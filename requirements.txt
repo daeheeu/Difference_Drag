@@ -1,3 +1,4 @@
 orekit-jpype
 numpy
 pandas
+jpype1

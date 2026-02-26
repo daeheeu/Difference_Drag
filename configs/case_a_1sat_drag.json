@@ -1,0 +1,30 @@
+{
+  "case_name": "CASE_A_1SAT_DRAG_ONLY",
+  "epoch_utc": "2026-02-24T00:00:00Z",
+  "duration_sec": 259200,
+  "step_sec": 60,
+
+  "orbit_init": {
+    "altitude_m": 500000,
+    "inclination_deg": 97.0,
+    "raan_deg": 0.0,
+    "argp_deg": 0.0,
+    "mean_anomaly_deg": 0.0
+  },
+
+  "spacecraft": {
+    "mass_kg": 30.0,
+    "cd": 2.2,
+    "area_m2": 0.052578
+  },
+
+  "gravity": {
+    "degree": 20,
+    "order": 20
+  },
+
+  "outputs": {
+    "csv_path": "outputs/case_a_1sat.csv",
+    "eclipse_csv_path": "outputs/case_b_eclipse.csv"
+  }
+}

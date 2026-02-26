@@ -1,5 +1,23 @@
+# Python venv / cache
 .venv/
 __pycache__/
-outputs/*.csv
-data/orekit-data*
+
+# Logs
 *.log
+
+# Generated outputs (do not commit)
+outputs/
+
+# Orekit data (do not commit)
+data/orekit-data*
+
+# Temp files
+*.tmp
+~WRL*.tmp
+
+# Reference docs (do not commit)
+참고\ 문서/
+*.pdf
+*.docx
+*.pptx
+*.zip

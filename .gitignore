@@ -6,16 +6,43 @@ __pycache__/
 *.log
 
 # Generated outputs (do not commit)
+# =========================
+# Python / VSCode
+# =========================
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+
+# =========================
+# Outputs (generated)
+# =========================
 outputs/
 
-# Orekit data (do not commit)
-data/orekit-data*
+# =========================
+# Data (do not commit)
+# - orekit data package
+# - navigation solution outputs
+# =========================
+data/orekit-data.zip
+data/orekit-data*/
+data/*.navSol
+data/*.navsol
+data/*.csv
 
+# data 폴더 전체를 다 제외하고 싶으면 아래 주석 제거
+# orekit-data.zip이나 샘플 데이터만 예외로 추적하려면 ! 규칙을 추가
+# data/
+
+# =========================
 # Temp files
+# =========================
 *.tmp
 ~WRL*.tmp
 
-# Reference docs (do not commit)
+# =========================
+# Reference docs
+# =========================
 참고\ 문서/
 *.pdf
 *.docx

@@ -5,7 +5,7 @@ __pycache__/
 # Logs
 *.log
 
-# Generated outputs (do not commit)
+# Generated outputs
 # =========================
 # Python / VSCode
 # =========================
@@ -20,7 +20,7 @@ __pycache__/
 outputs/
 
 # =========================
-# Data (do not commit)
+# Data
 # - orekit data package
 # - navigation solution outputs
 # =========================

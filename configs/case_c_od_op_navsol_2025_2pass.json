@@ -1,0 +1,68 @@
+{
+  "inputs": {
+    "navsol_day1_csv": "data/navsol_2025-05-01.csv",
+    "navsol_day2_csv": "data/navsol_2025-05-02.csv"
+  },
+
+  "arc_gap_s": 1.5,
+
+  "inertial_frame": "GCRF",
+
+  "od": {
+    "arc_mode": "all",
+    "anchor": "last"
+  },
+
+  "op": {
+    "arc_indices": [0, 1, 2],
+    "pos_sigma_m": 10.0
+  },
+
+  "forces": {
+    "mass_kg": 30.0,
+    "area_m2": 0.052578,
+
+    "cd0": 2.3,
+    "estimate_cd": true,
+    "cd_min": 1.2,
+    "cd_max": 4.0,
+    "cd_scale": 0.1,
+
+    "gravity_degree": 20,
+    "gravity_order": 20,
+    "use_third_body": true,
+
+    "use_drag": true,
+    "atmosphere": "SIMPLE_EXP",
+    "rho0": 3.614e-13,
+    "h0_m": 500000.0,
+    "h_scale_m": 60000.0
+  },
+
+  "od_passes": [
+    {
+      "name": "pass1_state",
+      "downsample_s": 30,
+      "pos_sigma_m": 50.0,
+      "estimate_cd": false,
+      "gravity_degree": 10,
+      "gravity_order": 10,
+      "use_third_body": false,
+      "max_iterations": 80,
+      "max_evaluations": 800
+    },
+    {
+      "name": "pass2_cd",
+      "downsample_s": 10,
+      "pos_sigma_m": 30.0,
+      "estimate_cd": true,
+      "gravity_degree": 20,
+      "gravity_order": 20,
+      "use_third_body": true,
+      "max_iterations": 200,
+      "max_evaluations": 3000
+    }
+  ],
+
+  "outputs_dir": "outputs"
+}

@@ -1,0 +1,35 @@
+{
+  "inputs": {
+    "navsol_day1_csv": "data/navsol_2025-05-01.csv"
+  },
+  "arc_gap_s": 1.5,
+
+  "od": {
+    "arc_mode": "longest",
+    "anchor": "last",
+    "downsample_s": 10,
+    "pos_sigma_m": 30.0
+  },
+
+  "op": {
+    "time_start_utc": "2025-05-01T18:53:35Z",
+    "span_hours": 24,
+    "step_s": 60
+  },
+
+  "forces": {
+    "mass_kg": 30.0,
+    "area_m2": 0.052578,
+    "cd0": 2.3,
+    "estimate_cd": false,
+    "gravity_degree": 20,
+    "gravity_order": 20,
+    "use_third_body": false,
+    "atmosphere": "SIMPLE_EXP",
+    "rho0": 3.614e-13,
+    "h0_m": 500000.0,
+    "h_scale_m": 60000.0
+  },
+
+  "outputs_dir": "outputs"
+}

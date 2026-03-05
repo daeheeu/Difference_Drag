@@ -35,9 +35,14 @@ class ODWindow:
 
 @dataclass
 class OPWindow:
-    arc_indices: Optional[List[int]] = None  # e.g. [0,1,2]; None => all
-    pos_sigma_m: float = 10.0
+    arc_indices: Optional[List[int]] = None   # day2 있을 때만 사용
+    pos_sigma_m: float = 10.0                 # 검증 sigma
 
+    # day2 없을 때 OP ephemeris 생성용(time grid)
+    time_start_utc: Optional[str] = None      # 예: "2025-05-01T18:53:35Z"
+    time_end_utc: Optional[str] = None        # 예: "2025-05-02T18:53:35Z"
+    span_hours: float = 24.0                  # end가 없으면 start + span_hours
+    step_s: int = 60                          # ephemeris 시간 간격
 
 @dataclass
 class ForceModelCfg:
@@ -56,16 +61,16 @@ class ForceModelCfg:
     h0_m: float = 500000.0
     h_scale_m: float = 60000.0
 
-
+# CaseCConfig에서 day2를 optional 처리
 @dataclass
 class CaseCConfig:
     navsol_day1_csv: str
-    navsol_day2_csv: str
-    arc_gap_s: float
-    od: ODWindow
-    op: OPWindow
-    forces: ForceModelCfg
-    outputs_dir: str
+    navsol_day2_csv: Optional[str] = None
+    arc_gap_s: float = 1.5
+    od: ODWindow = None
+    op: OPWindow = None
+    forces: ForceModelCfg = None
+    outputs_dir: str = "outputs"
 
 
 def _as_dt_utc(s: str) -> pd.Timestamp:
@@ -211,6 +216,8 @@ def select_od_segment(df: pd.DataFrame, gap_s: float, od: ODWindow) -> pd.DataFr
     # arc_mode auto selection
     arc_mode = getattr(od, "arc_mode", None)
     if arc_mode:
+        arc_mode = arc_mode.strip().lower()
+
         # build arc meta
         meta = []
         for i, (s, e) in enumerate(arcs):
@@ -296,6 +303,34 @@ def downsample(df: pd.DataFrame, step_s: int) -> pd.DataFrame:
     mask = (dt_s % step_s) < 1e-6
     return df.loc[mask].copy().reset_index(drop=True)
 
+def build_op_epochs(cfg: CaseCConfig, od_df: pd.DataFrame, op_df: Optional[pd.DataFrame]) -> pd.DatetimeIndex:
+    """
+    OP epoch 생성 규칙
+    - day2(op_df)가 있으면: op_df["dt"]를 그대로 사용
+    - day2가 없으면: cfg.op.time_start_utc / time_end_utc(or span_hours) / step_s 로 time-grid 생성
+    """
+    if op_df is not None and len(op_df) > 0:
+        return pd.DatetimeIndex(op_df["dt"])
+
+    # day2가 없으면 time-grid 생성
+    if cfg.op.time_start_utc:
+        t0 = pd.to_datetime(cfg.op.time_start_utc, utc=True)
+    else:
+        # 기본: OD 데이터 마지막 시각
+        t0 = pd.to_datetime(od_df["dt"].iloc[-1], utc=True)
+
+    if cfg.op.time_end_utc:
+        t1 = pd.to_datetime(cfg.op.time_end_utc, utc=True)
+    else:
+        t1 = t0 + pd.Timedelta(hours=float(cfg.op.span_hours))
+
+    step = int(cfg.op.step_s)
+    if step < 1:
+        step = 1
+
+    # pandas 기본은 start/end 포함(단, freq 격자에 정확히 맞지 않으면 end가 포함 안될 수 있음)
+    return pd.date_range(start=t0, end=t1, freq=pd.Timedelta(seconds=step), tz="UTC")
+
 
 def estimate_v_ecef(df: pd.DataFrame, idx0: int = 0) -> np.ndarray:
     if len(df) < idx0 + 3:
@@ -317,19 +352,19 @@ def main():
 
     cfg = CaseCConfig(
         navsol_day1_csv=cfg_raw["inputs"]["navsol_day1_csv"],
-        navsol_day2_csv=cfg_raw["inputs"]["navsol_day2_csv"],
+        navsol_day2_csv=cfg_raw["inputs"].get("navsol_day2_csv"),
         arc_gap_s=float(cfg_raw.get("arc_gap_s", 1.5)),
         od=ODWindow(**cfg_raw["od"]),
         op=OPWindow(**cfg_raw["op"]),
         forces=ForceModelCfg(**cfg_raw["forces"]),
         outputs_dir=str(cfg_raw.get("outputs_dir", "outputs")),
-    )
+        )
 
     out_dir = Path(cfg.outputs_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Start JVM + set classpath + load orekit-data (reusing your stable bootstrap)
-    init_orekit()  # same pattern as Case A :contentReference[oaicite:1]{index=1}
+    init_orekit()  # same pattern as Case A
 
     # Orekit imports AFTER init_orekit()
     from org.hipparchus.optim.nonlinear.vector.leastsquares import LevenbergMarquardtOptimizer
@@ -352,20 +387,31 @@ def main():
 
     # Load data
     df1 = load_navsol(cfg.navsol_day1_csv)
-    df2 = load_navsol(cfg.navsol_day2_csv)
+    
+    df2 = None
+    if cfg.navsol_day2_csv:
+        try:
+            df2 = load_navsol(cfg.navsol_day2_csv)
+        except FileNotFoundError:
+            df2 = None
 
     print_arc_summary("DAY1", df1, cfg.arc_gap_s)
-    print_arc_summary("DAY2", df2, cfg.arc_gap_s)
+    if df2 is not None:
+        print_arc_summary("DAY2", df2, cfg.arc_gap_s)
+    else:
+        print("\n[DAY2] navsol_day2_csv not provided or file not found -> validation will be skipped.")
 
-    od_df = select_od_segment(df1, cfg.arc_gap_s, cfg.od)
-    od_df = downsample(od_df, cfg.od.downsample_s)
+    od_df_full = select_od_segment(df1, cfg.arc_gap_s, cfg.od)
+    od_df = downsample(od_df_full, cfg.od.downsample_s)
 
-    op_df = select_op_segment(df2, cfg.arc_gap_s, cfg.op)
+    op_df = None
+    if df2 is not None:
+        op_df = select_op_segment(df2, cfg.arc_gap_s, cfg.op)
 
     # Frames
     utc = TimeScalesFactory.getUTC()
     inertial = FramesFactory.getEME2000()
-    itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)  # uses EOP if available in orekit-data :contentReference[oaicite:2]{index=2}
+    itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)  # uses EOP if available in orekit-data
 
     earth = OneAxisEllipsoid(
         Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
@@ -378,18 +424,18 @@ def main():
                             ts.second + ts.microsecond * 1e-6, utc)
 
     # Initial guess from OD arc first epoch
-    ref_idx = pick_od_reference_index(od_df, cfg.arc_gap_s, cfg.od.anchor)
+    ref_idx_full = pick_od_reference_index(od_df_full, cfg.arc_gap_s, cfg.od.anchor)
 
-    r0_ecef = od_df.loc[ref_idx, ["x_m","y_m","z_m"]].to_numpy(dtype=float)
-    v0_ecef = estimate_v_ecef(od_df, ref_idx)
+    r0_ecef = od_df_full.loc[ref_idx_full, ["x_m","y_m","z_m"]].to_numpy(dtype=float)
+    v0_ecef = estimate_v_ecef(od_df_full, ref_idx_full)
 
-    t_ref = to_absdate(od_df.loc[ref_idx, "dt"])
+    t_ref = to_absdate(od_df_full.loc[ref_idx_full, "dt"])
     tr0 = itrf.getTransformTo(inertial, t_ref)
     pv0 = tr0.transformPVCoordinates(PVCoordinates(Vector3D(*r0_ecef), Vector3D(*v0_ecef)))
 
     mu = Constants.WGS84_EARTH_MU
     orbit0 = CartesianOrbit(pv0, inertial, t_ref, mu)
-    state0 = SpacecraftState(orbit0, cfg.forces.mass_kg)
+    # state0 = SpacecraftState(orbit0, cfg.forces.mass_kg)
 
     # Integrator builder for NumericalPropagatorBuilder
     min_step = 0.1
@@ -426,8 +472,8 @@ def main():
 
     # Estimator
     estimator = BatchLSEstimator(LevenbergMarquardtOptimizer(), builder)
-    estimator.setMaxIterations(80)
-    estimator.setMaxEvaluations(200)
+    estimator.setMaxIterations(300)
+    estimator.setMaxEvaluations(8000)
 
     sat = ObservableSatellite(0)
 
@@ -444,6 +490,82 @@ def main():
     # Run OD
     estimated = estimator.estimate()       # returns Propagator[] (Java array)
     prop = estimated[0]               # take first fitted propagator
+
+    # OD solution 저장 (재사용용)
+    st_ref = prop.propagate(t_ref)
+    pv_ref_i = st_ref.getPVCoordinates()
+    ri = pv_ref_i.getPosition()
+    vi = pv_ref_i.getVelocity()
+
+    tr_ref = inertial.getTransformTo(itrf, t_ref)
+    pv_ref_e = tr_ref.transformPVCoordinates(pv_ref_i)
+    re = pv_ref_e.getPosition()
+    ve = pv_ref_e.getVelocity()
+    
+    cd_est = None
+    if cfg.forces.estimate_cd:
+        try:
+            drivers = list(drag_sensitive.getDragParametersDrivers())
+            if drivers:
+                cd_est = float(drivers[0].getValue())
+        except Exception:
+            cd_est = None
+
+    od_solution = {
+        "epoch_utc": od_df_full.loc[ref_idx_full, "dt"].strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "frame_inertial": "EME2000",
+        "state_inertial": {
+            "r_m": [ri.getX(), ri.getY(), ri.getZ()],
+            "v_mps": [vi.getX(), vi.getY(), vi.getZ()],
+        },
+        "state_ecef": {
+            "r_m": [re.getX(), re.getY(), re.getZ()],
+            "v_mps": [ve.getX(), ve.getY(), ve.getZ()],
+        },
+        "estimated_params": {
+            "cd": cd_est
+        },
+        "meta": {
+            "gravity_degree": cfg.forces.gravity_degree,
+            "gravity_order": cfg.forces.gravity_order,
+            "use_third_body": cfg.forces.use_third_body,
+            "atmosphere": cfg.forces.atmosphere,
+            "mass_kg": cfg.forces.mass_kg,
+            "area_m2": cfg.forces.area_m2,
+        }
+    }
+    (out_dir / "case_c_od_solution.json").write_text(json.dumps(od_solution, indent=2), encoding="utf-8")
+
+
+    # OP ephemeris (항상 생성/저장)
+    op_epochs = build_op_epochs(cfg, od_df_full, op_df)
+
+    ephem_rows = []
+    for ts in op_epochs:
+        date = to_absdate(ts)
+        st = prop.propagate(date)
+        pv_i = st.getPVCoordinates()
+
+        # inertial PV
+        ri = pv_i.getPosition()
+        vi = pv_i.getVelocity()
+
+        # ECEF PV
+        tr = inertial.getTransformTo(itrf, date)
+        pv_e = tr.transformPVCoordinates(pv_i)
+        re = pv_e.getPosition()
+        ve = pv_e.getVelocity()
+
+        ephem_rows.append({
+            "iso_utc": ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "x_i_m": ri.getX(), "y_i_m": ri.getY(), "z_i_m": ri.getZ(),
+            "vx_i_mps": vi.getX(), "vy_i_mps": vi.getY(), "vz_i_mps": vi.getZ(),
+            "x_ecef_m": re.getX(), "y_ecef_m": re.getY(), "z_ecef_m": re.getZ(),
+            "vx_ecef_mps": ve.getX(), "vy_ecef_mps": ve.getY(), "vz_ecef_mps": ve.getZ(),
+        })
+
+    op_ephem = pd.DataFrame(ephem_rows)
+    op_ephem.to_csv(out_dir / "case_c_op_ephemeris.csv", index=False, encoding="utf-8-sig")
 
     # OD fit residuals (ECEF)
     od_rows = []
@@ -464,60 +586,79 @@ def main():
     od_rms = float(np.sqrt(np.mean(od_fit["err_norm_m"].to_numpy() ** 2)))
 
     # OP validation: propagate at all day2 epochs and compare in inertial, report 3D + RIC
-    op_rows = []
-    for _, row in op_df.iterrows():
-        date = to_absdate(row["dt"])
-        st = prop.propagate(date)
-        pv = st.getPVCoordinates()
+    validated = False
+    op_rms = None
+    dR_rms = dI_rms = dC_rms = None
 
-        # NavSol ECEF -> inertial
-        tr = itrf.getTransformTo(inertial, date)
-        p_nav = tr.transformPosition(Vector3D(float(row["x_m"]), float(row["y_m"]), float(row["z_m"])))
+    if op_df is not None:
+        validated = True
 
-        e = pv.getPosition().subtract(p_nav)  # OP - NavSol (inertial)
-        ex, ey, ez = e.getX(), e.getY(), e.getZ()
-        err_norm = math.sqrt(ex*ex + ey*ey + ez*ez)
+        op_rows = []
+        for _, row in op_df.iterrows():
+            date = to_absdate(row["dt"])
+            st = prop.propagate(date)
+            pv = st.getPVCoordinates()
 
-        # RIC basis from OP state
-        r = pv.getPosition()
-        v = pv.getVelocity()
-        r_hat = r.normalize()
-        c_hat = r.crossProduct(v).normalize()
-        i_hat = c_hat.crossProduct(r_hat)
+            # NavSol ECEF -> inertial
+            tr = itrf.getTransformTo(inertial, date)
+            p_nav = tr.transformPosition(Vector3D(float(row["x_m"]), float(row["y_m"]), float(row["z_m"])))
 
-        dR = e.dotProduct(r_hat)
-        dI = e.dotProduct(i_hat)
-        dC = e.dotProduct(c_hat)
+            e = pv.getPosition().subtract(p_nav)  # OP - NavSol (inertial)
+            ex, ey, ez = e.getX(), e.getY(), e.getZ()
+            err_norm = math.sqrt(ex*ex + ey*ey + ez*ez)
 
-        op_rows.append({
-            "iso_utc": row["iso_utc"],
-            "err_norm_m": err_norm,
-            "dR_m": dR,
-            "dI_m": dI,
-            "dC_m": dC,
-        })
-
-    op_val = pd.DataFrame(op_rows)
-    op_val.to_csv(out_dir / "case_c_op_validate.csv", index=False, encoding="utf-8-sig")
-
-    op_rms = float(np.sqrt(np.mean(op_val["err_norm_m"].to_numpy() ** 2)))
-    dR_rms = float(np.sqrt(np.mean(op_val["dR_m"].to_numpy() ** 2)))
-    dI_rms = float(np.sqrt(np.mean(op_val["dI_m"].to_numpy() ** 2)))
-    dC_rms = float(np.sqrt(np.mean(op_val["dC_m"].to_numpy() ** 2)))
+            # RIC basis from OP state
+            r = pv.getPosition()
+            v = pv.getVelocity()
+            r_hat = r.normalize()
+            c_hat = r.crossProduct(v).normalize()
+            i_hat = c_hat.crossProduct(r_hat)
+            
+            dR = e.dotProduct(r_hat)
+            dI = e.dotProduct(i_hat)
+            dC = e.dotProduct(c_hat)
+            
+            op_rows.append({
+                "iso_utc": row["iso_utc"],
+                "err_norm_m": err_norm,
+                "dR_m": dR,
+                "dI_m": dI,
+                "dC_m": dC,
+            })
+            
+        op_val = pd.DataFrame(op_rows)
+        op_val.to_csv(out_dir / "case_c_op_validate.csv", index=False, encoding="utf-8-sig")
+            
+        op_rms = float(np.sqrt(np.mean(op_val["err_norm_m"].to_numpy() ** 2)))
+        dR_rms = float(np.sqrt(np.mean(op_val["dR_m"].to_numpy() ** 2)))
+        dI_rms = float(np.sqrt(np.mean(op_val["dI_m"].to_numpy() ** 2)))
+        dC_rms = float(np.sqrt(np.mean(op_val["dC_m"].to_numpy() ** 2)))
+    else:
+        print("\n[VALIDATION] Skipped (no day2 navsol).")   
 
     summary = {
+        "validated": validated,
         "od_fit_rms_m": od_rms,
+        "od_solution_json": "case_c_od_solution.json",
+        "op_ephemeris_csv": "case_c_op_ephemeris.csv",
+
         "op_rms_3d_m": op_rms,
-        "op_rms_RIC_m": {"R": dR_rms, "I": dI_rms, "C": dC_rms},
+        "op_rms_RIC_m": (None if not validated else {"R": dR_rms, "I": dI_rms, "C": dC_rms}),
         "od_points": int(len(od_df)),
-        "op_points": int(len(op_df)),
+        "op_points": (0 if op_df is None else int(len(op_df))),
         "od_selection": {
             "arc_index": cfg.od.arc_index,
             "time_start_utc": cfg.od.time_start_utc,
             "time_end_utc": cfg.od.time_end_utc,
             "downsample_s": cfg.od.downsample_s,
         },
-        "op_selection": {"arc_indices": cfg.op.arc_indices},
+        "op_selection": {
+            "arc_indices": cfg.op.arc_indices,
+            "time_start_utc": cfg.op.time_start_utc,
+            "time_end_utc": cfg.op.time_end_utc,
+            "span_hours": cfg.op.span_hours,
+            "step_s": cfg.op.step_s,
+        },
     }
     (out_dir / "case_c_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print("\n=== SUMMARY ===")

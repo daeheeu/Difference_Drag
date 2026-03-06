@@ -5,7 +5,7 @@ Supports:
 - NovAtel ASCII BESTXYZ (e.g., #BESTXYZA, #BESTXYZ)
 - Optional NMEA GPGSA to attach PRN list (satellites used)
 - Outputs:
-  1) MicroCosm-like .navSol text file
+  1) navSol text file
   2) CSV (for QA/plotting)
 
 Typical usage:
@@ -22,7 +22,9 @@ import datetime as dt
 import glob
 import os
 import re
+import sys
 from typing import List, Dict, Any, Optional, Tuple
+from collections import defaultdict
 
 GPS_EPOCH = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc)
 
@@ -127,7 +129,7 @@ def extract_records(paths: List[str], leap_seconds: int, valid_only: bool) -> Li
                         "solstat": solstat,
                         "postype": postype,
                         "valid": valid,
-                        "mode": 2,      # matches your 2024-05-01 .navSol (mode=2)
+                        "mode": 2,
                         "x_m": x,
                         "y_m": y,
                         "z_m": z,
@@ -189,6 +191,204 @@ def write_csv(rows: List[Dict[str, Any]], out_path: str) -> None:
             prns = ",".join(str(p) for p in r["prns"])
             w.writerow([iso, r["x_m"], r["y_m"], r["z_m"], r["valid"], r["mode"], r["nsv"], prns,
                         r["source"], r["gps_week"], r["gps_sow"], r["solstat"], r["postype"]])
+
+
+def group_rows_by_utc_date(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    rows를 UTC 날짜(YYYY-MM-DD)별로 그룹화
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        day = r["dt_utc"].strftime("%Y-%m-%d")
+        groups[day].append(r)
+    for day in groups:
+        groups[day].sort(key=lambda x: x["dt_utc"])
+    return dict(groups)
+
+
+def write_daily_outputs(
+    rows: List[Dict[str, Any]],
+    out_dir: str,
+    write_csv_too: bool = True,
+    also_save_longest: bool = False,
+    max_gap_s: float = 60.0,          # 연속성 판단 기준(기본값 60초), 만약 GPS수신기 데이터 수집 gap +60초 이상 변경 시 해당 수치 조정해야함
+) -> List[str]:
+    """
+    날짜별로 navsol_YYYY-MM-DD.navSol (+ csv) 저장
+    옵션: also_save_longest=True면, 가장 긴 연속 arc를 navsol_YYYY-MM-DD_longest.* 로 추가 저장
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    created: List[str] = []
+    groups = group_rows_by_utc_date(rows)
+
+    def arc_duration_s(arc: List[Dict[str, Any]]) -> float:
+        if len(arc) < 2:
+            return 0.0
+        return (arc[-1]["dt_utc"] - arc[0]["dt_utc"]).total_seconds()
+
+    for day, day_rows in sorted(groups.items()):
+        # full day 저장
+        nav_path = os.path.join(out_dir, f"navsol_{day}.navSol")
+        write_navsol(day_rows, nav_path)
+        created.append(nav_path)
+
+        if write_csv_too:
+            csv_path = os.path.join(out_dir, f"navsol_{day}.csv")
+            write_csv(day_rows, csv_path)
+            created.append(csv_path)
+
+        # longest arc 추가 저장
+        if also_save_longest:
+            arcs = split_arcs(day_rows, max_gap_s=max_gap_s)
+            if arcs:
+                longest = max(arcs, key=arc_duration_s)
+
+                nav_path2 = os.path.join(out_dir, f"navsol_{day}_longest.navSol")
+                write_navsol(longest, nav_path2)
+                created.append(nav_path2)
+
+                if write_csv_too:
+                    csv_path2 = os.path.join(out_dir, f"navsol_{day}_longest.csv")
+                    write_csv(longest, csv_path2)
+                    created.append(csv_path2)
+
+    return created
+
+
+def gui_main():
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    root = tk.Tk()
+    root.title("NavSol Extractor (GNSS Log -> navSol/CSV)")
+    root.geometry("720x420")
+
+    files_var = tk.StringVar(value="선택된 파일 없음")
+    outdir_var = tk.StringVar(value=os.path.join(os.getcwd(), "output"))
+    leap_var = tk.IntVar(value=18)
+    valid_only_var = tk.BooleanVar(value=True)
+    write_csv_var = tk.BooleanVar(value=True)
+    also_longest_var = tk.BooleanVar(value=True)
+    max_gap_var = tk.DoubleVar(value=60.0)
+
+    selected_files: List[str] = []
+
+    def refresh_files_label():
+        if not selected_files:
+            files_var.set("선택된 파일 없음")
+        else:
+            files_var.set(f"{len(selected_files)}개 파일 선택됨")
+
+    def on_add_files():
+        nonlocal selected_files
+        files = filedialog.askopenfilenames(
+            title="GNSS Raw Log 파일 선택(.dat/.txt)",
+            filetypes=[("Log files", "*.dat *.txt *.log"), ("All files", "*.*")]
+        )
+        if files:
+            # 중복 제거
+            merged = list(dict.fromkeys(list(selected_files) + list(files)))
+            selected_files = merged
+            refresh_files_label()
+
+    def on_clear_files():
+        nonlocal selected_files
+        selected_files = []
+        refresh_files_label()
+
+    def on_pick_outdir():
+        d = filedialog.askdirectory(title="출력 폴더 선택")
+        if d:
+            outdir_var.set(d)
+
+    def on_run():
+        if not selected_files:
+            messagebox.showwarning("경고", "먼저 GNSS 로그 파일을 선택하세요.")
+            return
+
+        out_dir = outdir_var.get().strip()
+        if not out_dir:
+            messagebox.showwarning("경고", "출력 폴더를 지정하세요.")
+            return
+
+        try:
+            # 추출
+            rows = extract_records(
+                paths=list(selected_files),
+                leap_seconds=int(leap_var.get()),
+                valid_only=bool(valid_only_var.get())
+            )
+
+            if not rows:
+                messagebox.showinfo("결과", "추출된 NavSol 레코드가 없습니다.")
+                return
+
+            created = write_daily_outputs(
+                rows, 
+                out_dir, 
+                write_csv_too=bool(write_csv_var.get()),
+                also_save_longest=bool(also_longest_var.get()),
+                max_gap_s=float(max_gap_var.get()),
+            )
+
+            # 결과 요약
+            groups = group_rows_by_utc_date(rows)
+            summary_lines = [f"입력 파일: {len(selected_files)}개",
+                             f"추출 레코드: {len(rows)}개",
+                             f"생성 날짜: {len(groups)}일",
+                             f"출력 폴더: {out_dir}",
+                             "",
+                             "날짜별 레코드 수:"]
+            for day, day_rows in sorted(groups.items()):
+                summary_lines.append(f"  - {day}: {len(day_rows)}")
+
+            messagebox.showinfo("완료", "\n".join(summary_lines))
+
+        except Exception as e:
+            messagebox.showerror("오류", str(e))
+
+    # --- UI Layout ---
+    frm = ttk.Frame(root, padding=10)
+    frm.pack(fill="both", expand=True)
+
+    row = 0
+    ttk.Label(frm, text="1) GNSS 로그 파일 선택").grid(row=row, column=0, sticky="w")
+    ttk.Button(frm, text="파일 추가", command=on_add_files).grid(row=row, column=1, sticky="w", padx=5)
+    ttk.Button(frm, text="선택 초기화", command=on_clear_files).grid(row=row, column=2, sticky="w")
+    row += 1
+
+    ttk.Label(frm, textvariable=files_var).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10))
+    row += 1
+
+    ttk.Label(frm, text="2) 출력 폴더").grid(row=row, column=0, sticky="w")
+    ttk.Entry(frm, textvariable=outdir_var, width=60).grid(row=row, column=1, sticky="we", padx=5)
+    ttk.Button(frm, text="찾기", command=on_pick_outdir).grid(row=row, column=2, sticky="w")
+    row += 1
+
+    ttk.Label(frm, text="3) 옵션").grid(row=row, column=0, sticky="w", pady=(10, 0))
+    row += 1
+
+    opt = ttk.Frame(frm)
+    opt.grid(row=row, column=0, columnspan=3, sticky="we")
+    ttk.Label(opt, text="GPS-UTC leap seconds").grid(row=0, column=0, sticky="w")
+    ttk.Spinbox(opt, from_=0, to=30, textvariable=leap_var, width=5).grid(row=0, column=1, sticky="w", padx=5)
+    ttk.Checkbutton(opt, text="SOL_COMPUTED (valid only)", variable=valid_only_var).grid(row=0, column=2, sticky="w", padx=10)
+    ttk.Checkbutton(opt, text="CSV 저장", variable=write_csv_var).grid(row=0, column=3, sticky="w", padx=10)
+    ttk.Checkbutton(opt, text="Longest arc", variable=also_longest_var).grid(row=1, column=0, sticky="w", pady=(6,0))
+    ttk.Label(opt, text="gap(s)").grid(row=1, column=1, sticky="e", pady=(6,0))
+    ttk.Spinbox(opt, from_=1, to=600, textvariable=max_gap_var, width=8).grid(row=1, column=2, sticky="w", padx=5, pady=(6,0))
+    row += 1
+
+    ttk.Separator(frm).grid(row=row, column=0, columnspan=3, sticky="we", pady=15)
+    row += 1
+
+    ttk.Button(frm, text="실행", command=on_run).grid(row=row, column=0, sticky="w")
+    ttk.Label(frm, text="(날짜별로 navsol_YYYY-MM-DD.navSol / navsol_YYYY-MM-DD.csv 저장)").grid(row=row, column=1, columnspan=2, sticky="w")
+
+    frm.columnconfigure(1, weight=1)
+
+    refresh_files_label()
+    root.mainloop()
 
 
 def pick_files_dialog() -> List[str]:
@@ -287,4 +487,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        gui_main()
+    else:
+        main()

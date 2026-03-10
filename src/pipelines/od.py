@@ -33,6 +33,14 @@ import pandas as pd
 
 from src.orekit_bootstrap import init_orekit
 
+from src.dynamics.force_model import (
+    ForceModelCfg,
+    apply_force_models,
+    build_force_model_bundle,
+    force_cfg_from_dict,
+    force_cfg_to_dict,
+)
+
 
 # -----------------------------
 # Config dataclasses
@@ -59,23 +67,6 @@ class ODWindow:
     # OD measurement processing
     downsample_s: int = 1
     pos_sigma_m: float = 10.0
-
-
-@dataclass
-class ForceModelCfg:
-    mass_kg: float = 30.0
-    area_m2: float = 0.052578
-    cd0: float = 2.3
-    estimate_cd: bool = True
-
-    gravity_degree: int = 20
-    gravity_order: int = 20
-    use_third_body: bool = True
-
-    atmosphere: str = "SIMPLE_EXP"
-    rho0: float = 3.614e-13
-    h0_m: float = 500000.0
-    h_scale_m: float = 60000.0
 
 
 @dataclass
@@ -373,7 +364,7 @@ def _parse_run_cfg(cfg_raw: Dict[str, Any]) -> ODRunCfg:
     arc_gap_s = float(cfg_raw.get("arc_gap_s", cfg_raw.get("arc_gap", 1.5)))
 
     od = ODWindow(**cfg_raw.get("od", {}))
-    forces = ForceModelCfg(**cfg_raw.get("forces", {}))
+    forces = force_cfg_from_dict(cfg_raw.get("forces", {}))
 
     outputs_dir = str(cfg_raw.get("outputs_dir", "outputs"))
     orekit_data_path = cfg_raw.get("orekit_data_path")
@@ -416,11 +407,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     from org.orekit.orbits import CartesianOrbit, PositionAngleType
     from org.orekit.propagation.conversion import DormandPrince853IntegratorBuilder
     from org.orekit.propagation.conversion import NumericalPropagatorBuilder
-    from org.orekit.forces.gravity.potential import GravityFieldFactory
-    from org.orekit.forces.gravity import HolmesFeatherstoneAttractionModel, ThirdBodyAttraction
-    from org.orekit.bodies import CelestialBodyFactory, OneAxisEllipsoid
-    from org.orekit.forces.drag import DragForce, IsotropicDrag
-    from org.orekit.models.earth.atmosphere import SimpleExponentialAtmosphere
+    from org.orekit.bodies import OneAxisEllipsoid
     from org.orekit.estimation.leastsquares import BatchLSEstimator
     from org.orekit.estimation.measurements import ObservableSatellite, Position
     from org.hipparchus.geometry.euclidean.threed import Vector3D
@@ -487,38 +474,24 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     builder.setMass(float(cfg.forces.mass_kg))
 
     # Force models
-    grav = GravityFieldFactory.getNormalizedProvider(
-        int(cfg.forces.gravity_degree), int(cfg.forces.gravity_order)
+    run_notes: List[str] = []
+
+    force_bundle = build_force_model_bundle(
+        itrf=itrf,
+        earth=earth,
+        forces=cfg.forces,
     )
-    builder.addForceModel(HolmesFeatherstoneAttractionModel(itrf, grav))
+    apply_force_models(builder, force_bundle)
+    run_notes.extend(force_bundle.notes or [])
 
-    if bool(cfg.forces.use_third_body):
-        builder.addForceModel(ThirdBodyAttraction(CelestialBodyFactory.getSun()))
-        builder.addForceModel(ThirdBodyAttraction(CelestialBodyFactory.getMoon()))
-
-    # Atmosphere
-    if str(cfg.forces.atmosphere).upper() == "SIMPLE_EXP":
-        atmosphere = SimpleExponentialAtmosphere(
-            earth,
-            float(cfg.forces.rho0),
-            float(cfg.forces.h0_m),
-            float(cfg.forces.h_scale_m),
-        )
-    else:
-        # Fallback to SIMPLE_EXP until we add NRLMSISE00 profile
-        atmosphere = SimpleExponentialAtmosphere(
-            earth,
-            float(cfg.forces.rho0),
-            float(cfg.forces.h0_m),
-            float(cfg.forces.h_scale_m),
-        )
-
-    drag_sensitive = IsotropicDrag(float(cfg.forces.area_m2), float(cfg.forces.cd0))
-    builder.addForceModel(DragForce(atmosphere, drag_sensitive))
-
+    # Phase-1 policy:
+    # direct constant-Cd estimation is intentionally parked.
+    # We keep the config flag for compatibility, but do not select drag drivers here.
     if bool(cfg.forces.estimate_cd):
-        for drv in drag_sensitive.getDragParametersDrivers():
-            drv.setSelected(True)
+        run_notes.append(
+            "estimate_cd was requested, but direct constant-Cd estimation "
+            "is intentionally disabled in phase-1."
+        )    
 
     # Estimator
     estimator = BatchLSEstimator(LevenbergMarquardtOptimizer(), builder)
@@ -542,15 +515,8 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     estimated = estimator.estimate()  # Java array of Propagator
     prop = estimated[0]
 
-    # Estimated Cd (if selected)
+    # Estimated Cd
     cd_est = None
-    if bool(cfg.forces.estimate_cd):
-        try:
-            drivers = list(drag_sensitive.getDragParametersDrivers())
-            if drivers:
-                cd_est = float(drivers[0].getValue())
-        except Exception:
-            cd_est = None
 
     # State at reference epoch
     st_ref = prop.propagate(t_ref)
@@ -607,19 +573,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
             "v_mps": [float(ve.getX()), float(ve.getY()), float(ve.getZ())],
         },
         "estimated_params": {"cd": cd_est},
-        "forces": {
-            "mass_kg": float(cfg.forces.mass_kg),
-            "area_m2": float(cfg.forces.area_m2),
-            "cd0": float(cfg.forces.cd0),
-            "estimate_cd": bool(cfg.forces.estimate_cd),
-            "gravity_degree": int(cfg.forces.gravity_degree),
-            "gravity_order": int(cfg.forces.gravity_order),
-            "use_third_body": bool(cfg.forces.use_third_body),
-            "atmosphere": str(cfg.forces.atmosphere),
-            "rho0": float(cfg.forces.rho0),
-            "h0_m": float(cfg.forces.h0_m),
-            "h_scale_m": float(cfg.forces.h_scale_m),
-        },
+        "forces": force_cfg_to_dict(cfg.forces, force_bundle),
         "od_window": {
             "arc_gap_s": float(cfg.arc_gap_s),
             "selection": {
@@ -637,6 +591,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
             "type": "BatchLSEstimator(LevenbergMarquardt)",
             "max_iterations": int(cfg.max_iterations),
             "max_evaluations": int(cfg.max_evaluations),
+            "notes": run_notes,
         },
     }
 
@@ -655,6 +610,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
         "od_fit_p95_m": od_p95,
         "od_fit_max_m": od_max,
         "estimated_cd": cd_est,
+        "notes": run_notes,
         "artifacts": {
             "od_solution_json": "od_solution.json",
             "od_fit_csv": "od_fit.csv",

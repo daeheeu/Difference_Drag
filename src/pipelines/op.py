@@ -18,7 +18,7 @@ Notes
 
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -29,6 +29,12 @@ import pandas as pd
 from src.orekit_bootstrap import init_orekit
 from src.pipelines.ccsds_oem import OEMMeta, write_oem_from_ephem_df
 
+from src.dynamics.force_model import (
+    apply_force_models,
+    build_force_model_bundle,
+    force_cfg_from_dict,
+    force_cfg_to_dict,
+)
 
 def _parse_iso_utc(s: str) -> dt.datetime:
     s = s.strip()
@@ -119,11 +125,7 @@ def run_op(arg_path: str) -> Dict[str, Any]:
     from org.orekit.propagation import SpacecraftState
     from org.hipparchus.ode.nonstiff import DormandPrince853Integrator
     from org.orekit.propagation.numerical import NumericalPropagator
-    from org.orekit.forces.gravity.potential import GravityFieldFactory
-    from org.orekit.forces.gravity import HolmesFeatherstoneAttractionModel, ThirdBodyAttraction
-    from org.orekit.bodies import CelestialBodyFactory, OneAxisEllipsoid
-    from org.orekit.forces.drag import DragForce, IsotropicDrag
-    from org.orekit.models.earth.atmosphere import SimpleExponentialAtmosphere
+    from org.orekit.bodies import OneAxisEllipsoid
 
     utc = TimeScalesFactory.getUTC()
     inertial = FramesFactory.getEME2000()
@@ -135,12 +137,16 @@ def run_op(arg_path: str) -> Dict[str, Any]:
         itrf,
     )
 
-    forces = od_solution["forces"]
-    mass_kg = float(forces["mass_kg"])
-    area_m2 = float(forces["area_m2"])
-    cd0 = float(forces["cd0"])
+    forces_raw = od_solution["forces"]
+    forces = force_cfg_from_dict(forces_raw)
+
+    mass_kg = float(forces.mass_kg)
+
     cd_est = od_solution.get("estimated_params", {}).get("cd", None)
-    cd_used = float(cd_est) if cd_est is not None else cd0
+    cd_used = float(cd_est) if cd_est is not None else float(forces.cd0)
+
+    # OP에서는 실제 전파에 사용될 Cd를 force cfg에 반영
+    forces_for_op = replace(forces, cd0=cd_used)
 
     # Initial state
     epoch = _parse_iso_utc(str(od_solution["epoch_utc"]))
@@ -168,26 +174,20 @@ def run_op(arg_path: str) -> Dict[str, Any]:
     propagator.setInitialState(SpacecraftState(orbit0, mass_kg))
 
     # Force models
-    grav = GravityFieldFactory.getNormalizedProvider(int(forces["gravity_degree"]), int(forces["gravity_order"]))
-    propagator.addForceModel(HolmesFeatherstoneAttractionModel(itrf, grav))
+    run_notes = []
 
-    if bool(forces.get("use_third_body", False)):
-        propagator.addForceModel(ThirdBodyAttraction(CelestialBodyFactory.getSun()))
-        propagator.addForceModel(ThirdBodyAttraction(CelestialBodyFactory.getMoon()))
-
-    # Drag
-    atmosphere_kind = str(forces.get("atmosphere", "SIMPLE_EXP")).upper()
-    if atmosphere_kind == "SIMPLE_EXP":
-        atmosphere = SimpleExponentialAtmosphere(
-            earth, float(forces["rho0"]), float(forces["h0_m"]), float(forces["h_scale_m"])
+    force_bundle = build_force_model_bundle(
+        itrf=itrf,
+        earth=earth,
+        forces=forces_for_op,
         )
+    apply_force_models(propagator, force_bundle)
+    run_notes.extend(force_bundle.notes or [])
+    
+    if cd_est is not None:
+        run_notes.append(f"Using estimated Cd from OD: {cd_used}")
     else:
-        atmosphere = SimpleExponentialAtmosphere(
-            earth, float(forces["rho0"]), float(forces["h0_m"]), float(forces["h_scale_m"])
-        )
-
-    drag_sensitive = IsotropicDrag(area_m2, cd_used)
-    propagator.addForceModel(DragForce(atmosphere, drag_sensitive))
+        run_notes.append(f"Using nominal Cd from force config: {cd_used}")
 
     # Prop window
     start_dt = _parse_iso_utc(settings.time_start_utc) if settings.time_start_utc else epoch
@@ -242,6 +242,8 @@ def run_op(arg_path: str) -> Dict[str, Any]:
         "step_s": int(settings.step_s),
         "points": int(len(ephem)),
         "cd_used": cd_used,
+        "notes": run_notes,
+        "forces": force_cfg_to_dict(forces_for_op, force_bundle),
         "artifacts": {
             "op_ephemeris_csv": str(ephem_path.name),
             "op_ephemeris_oem": str(oem_path.name),

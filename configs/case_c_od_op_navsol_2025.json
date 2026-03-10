@@ -21,6 +21,7 @@
     "cd0": 2.3,
     "estimate_cd": false,
     "cr0": 1.5,
+    "tide_system": "ZERO_TIDE",
     "atmosphere": "SIMPLE_EXP",
     "rho0": 3.614e-13,
     "h0_m": 500000.0,

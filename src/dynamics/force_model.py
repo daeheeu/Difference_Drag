@@ -36,6 +36,7 @@ class ForceModelCfg:
 
     # tides
     use_tides: bool = False
+    tide_system: Optional[str] = None
     use_ocean_tides: bool = False
     ocean_tides_degree: int = 4
     ocean_tides_order: int = 4
@@ -74,12 +75,30 @@ def force_cfg_from_dict(raw: Optional[Dict[str, Any]]) -> ForceModelCfg:
             cfg.use_srp = True
         if "use_tides" not in filtered:
             cfg.use_tides = True
+        if "tide_system" not in filtered:
+            cfg.tide_system = "ZERO_TIDE"
         if "cr0" not in filtered:
             cfg.cr0 = 1.5
         if "srp_area_m2" not in filtered:
             cfg.srp_area_m2 = cfg.area_m2
 
     return cfg
+
+
+def _resolve_tide_system(name: Optional[str]):
+    from org.orekit.forces.gravity.potential import TideSystem
+
+    if name is None:
+        return None
+
+    key = str(name).strip().upper()
+
+    if key == "ZERO_TIDE":
+        return TideSystem.ZERO_TIDE
+    if key == "TIDE_FREE":
+        return TideSystem.TIDE_FREE
+
+    raise ValueError(f"Unsupported tide_system: {name}")
 
 
 def force_cfg_to_dict(
@@ -180,13 +199,24 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
     if bool(forces.use_tides):
         ut1 = TimeScalesFactory.getUT1(IERSConventions.IERS_2010, True)
 
-        tide_system = TideSystem.ZERO_TIDE
-        try:
-            tide_system = grav.getTideSystem()
-        except Exception:
+        forced_tide_system = _resolve_tide_system(forces.tide_system)
+
+        if forced_tide_system is not None:
+            tide_system = forced_tide_system
             notes.append(
-                "Gravity provider tide system not available; using ZERO_TIDE for SolidTides."
+                f"Solid tides enabled with forced tide_system={str(tide_system)}"
             )
+        else:
+            try:
+                tide_system = grav.getTideSystem()
+                notes.append(
+                    f"Solid tides enabled with provider tide_system={str(tide_system)}"
+                )
+            except Exception:
+                tide_system = TideSystem.ZERO_TIDE
+                notes.append(
+                    "Gravity provider tide system not available; using fallback tide_system=ZERO_TIDE"
+                )
 
         models.append(
             SolidTides(

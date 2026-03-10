@@ -1,49 +1,53 @@
-# Python venv / cache
-.venv/
-__pycache__/
-
-# Logs
-*.log
-
-# Generated outputs
 # =========================
-# Python / VSCode
+# Python
 # =========================
 .venv/
 __pycache__/
 *.pyc
+
+# =========================
+# Editor / IDE
+# =========================
 .vscode/
 
 # =========================
-# Outputs (generated)
+# Build / packaging
+# =========================
+build/
+dist/
+*.spec
+
+# =========================
+# Generated outputs
 # =========================
 outputs/
 
 # =========================
 # Data
-# - orekit data package
-# - navigation solution outputs
 # =========================
 data/orekit-data.zip
 data/orekit-data*/
 data/*.navSol
 data/*.navsol
+
+# CSV를 data 폴더 전체에서 자동 생성물로만 쓴다면 유지
 data/*.csv
 
-# data 폴더 전체를 다 제외하고 싶으면 아래 주석 제거
-# orekit-data.zip이나 샘플 데이터만 예외로 추적하려면 ! 규칙을 추가
-# data/
+# 만약 data 폴더 안에 샘플/기준 CSV를 Git에 올릴 수도 있다면
+# 위 줄(data/*.csv)은 지우고, 아래처럼 generated 하위 폴더만 제외하는 방식을 권장
+# data/generated/
 
 # =========================
-# Temp files
+# Logs / temp
 # =========================
+*.log
 *.tmp
 ~WRL*.tmp
 
 # =========================
 # Reference docs
 # =========================
-참고\ 문서/
+참고 문서/
 *.pdf
 *.docx
 *.pptx

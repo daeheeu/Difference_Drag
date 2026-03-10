@@ -1,0 +1,19 @@
+{
+  "__help": {
+    "inputs.navsol_day1_csv": "Day1 NavSol CSV (\ud544\uc218). \ubcf4\ud1b5 *_longest.csv \uad8c\uc7a5",
+    "inputs.navsol_day2_csv": "Day2 NavSol CSV (\uc120\ud0dd). validate \uc218\ud589 \uc2dc \ud544\uc694",
+    "arc_gap_s": "NavSol \uc5f0\uc18d arc \ud310\uc815 \uae30\uc900(\ucd08). longest arc\ub97c \ub9cc\ub4e4 \ub54c \uc0ac\uc6a9\ud55c \uac12\uacfc \ub3d9\uc77c \uad8c\uc7a5(\uc608: 60)",
+    "od": {
+      "arc_mode": "longest | all | longest_n | min_duration",
+      "anchor": "OD epoch \uae30\uc900: last(\uad8c\uc7a5)",
+      "downsample_s": "OD\uc5d0 \ub123\uc744 \uce21\uc815 \uac04\uaca9(\ucd08)",
+      "pos_sigma_m": "\uce21\uc815 \ud45c\uc900\ud3b8\ucc28(\ubbf8\ud130)"
+    },
+    "op": {
+      "time_start_utc": "\ube44\uc6cc\ub450\uba74 OD epoch \uc0ac\uc6a9. \uc9c0\uc815 \uc2dc ISO UTC \uc608: 2025-02-25T14:16:02Z",
+      "span_hours": "\uc608\uce21 \uc2dc\uac04(\uc2dc\uac04)",
+      "step_s": "OP \ucd9c\ub825 \uc2a4\ud15d(\ucd08)"
+    },
+    "forces": "\uc9c8\ub7c9/\ub2e8\uba74\uc801/\ud56d\ub825/\uc911\ub825\uc7a5/\ub300\uae30 \ubaa8\ub378 \uc124\uc815"
+  }
+}

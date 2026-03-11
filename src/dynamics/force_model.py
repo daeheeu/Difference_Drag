@@ -25,6 +25,8 @@ class ForceModelCfg:
     # drag
     drag_enabled: bool = True
     atmosphere: str = "SIMPLE_EXP"
+    space_weather_source: str = "AUTO"
+    msafe_strength: str = "AVERAGE"
     rho0: float = 3.614e-13
     h0_m: float = 500000.0
     h_scale_m: float = 60000.0
@@ -101,6 +103,123 @@ def _resolve_tide_system(name: Optional[str]):
     raise ValueError(f"Unsupported tide_system: {name}")
 
 
+def _resolve_msafe_strength(name: Optional[str]):
+    from org.orekit.models.earth.atmosphere.data import MarshallSolarActivityFutureEstimation
+
+    key = str(name or "AVERAGE").strip().upper()
+
+    if key == "WEAK":
+        return MarshallSolarActivityFutureEstimation.StrengthLevel.WEAK
+    if key == "AVERAGE":
+        return MarshallSolarActivityFutureEstimation.StrengthLevel.AVERAGE
+    if key == "STRONG":
+        return MarshallSolarActivityFutureEstimation.StrengthLevel.STRONG
+
+    raise ValueError(f"Unsupported msafe_strength: {name}")
+
+
+def _build_jb2008_provider(*, mgr: Any, utc: Any):
+    from org.orekit.models.earth.atmosphere.data import JB2008SpaceEnvironmentData
+
+    return JB2008SpaceEnvironmentData(
+        JB2008SpaceEnvironmentData.DEFAULT_SUPPORTED_NAMES_SOLFSMY,
+        JB2008SpaceEnvironmentData.DEFAULT_SUPPORTED_NAMES_DTC,
+        mgr,
+        utc,
+    )
+
+
+def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
+    from org.orekit.data import DataContext
+    from org.orekit.models.earth.atmosphere import SimpleExponentialAtmosphere, DTM2000, NRLMSISE00
+    from org.orekit.models.earth.atmosphere.data import (
+        CssiSpaceWeatherData,
+        MarshallSolarActivityFutureEstimation,
+    )
+    from org.orekit.time import TimeScalesFactory
+
+    requested = str(forces.atmosphere or "SIMPLE_EXP").strip().upper()
+    notes: List[str] = []
+
+    utc = TimeScalesFactory.getUTC()
+    mgr = DataContext.getDefault().getDataProvidersManager()
+
+    def _simple():
+        return (
+            SimpleExponentialAtmosphere(
+                earth,
+                float(forces.rho0),
+                float(forces.h0_m),
+                float(forces.h_scale_m),
+            ),
+            "SIMPLE_EXP",
+        )
+
+    def _cssi():
+        return CssiSpaceWeatherData(
+            CssiSpaceWeatherData.DEFAULT_SUPPORTED_NAMES,
+            mgr,
+            utc,
+        )
+
+    def _msafe():
+        return MarshallSolarActivityFutureEstimation(
+            MarshallSolarActivityFutureEstimation.DEFAULT_SUPPORTED_NAMES,
+            _resolve_msafe_strength(forces.msafe_strength),
+            mgr,
+            utc,
+        )
+
+    # AUTO / NRLMSISE00
+    if requested in ("AUTO", "NRLMSISE00", "NRLMSISE00_CSSI", "NRLMSISE00_MSAFE"):
+        if requested in ("AUTO", "NRLMSISE00", "NRLMSISE00_CSSI"):
+            try:
+                provider = _cssi()
+                return NRLMSISE00(provider, sun, earth, utc), "NRLMSISE00_CSSI", notes
+            except Exception as exc:
+                notes.append(f"NRLMSISE00_CSSI unavailable: {exc}")
+
+        if requested in ("AUTO", "NRLMSISE00", "NRLMSISE00_MSAFE"):
+            try:
+                provider = _msafe()
+                return NRLMSISE00(provider, sun, earth, utc), "NRLMSISE00_MSAFE", notes
+            except Exception as exc:
+                notes.append(f"NRLMSISE00_MSAFE unavailable: {exc}")
+
+        atm, realized = _simple()
+        notes.append(f"Atmosphere '{requested}' fell back to SIMPLE_EXP.")
+        return atm, realized, notes
+
+    # DTM2000
+    if requested in ("DTM2000", "DTM2000_CSSI", "DTM2000_MSAFE"):
+        if requested in ("DTM2000", "DTM2000_CSSI"):
+            try:
+                provider = _cssi()
+                return DTM2000(provider, sun, earth, utc), "DTM2000_CSSI", notes
+            except Exception as exc:
+                notes.append(f"DTM2000_CSSI unavailable: {exc}")
+
+        if requested in ("DTM2000", "DTM2000_MSAFE"):
+            try:
+                provider = _msafe()
+                return DTM2000(provider, sun, earth, utc), "DTM2000_MSAFE", notes
+            except Exception as exc:
+                notes.append(f"DTM2000_MSAFE unavailable: {exc}")
+
+        atm, realized = _simple()
+        notes.append(f"Atmosphere '{requested}' fell back to SIMPLE_EXP.")
+        return atm, realized, notes
+
+    # legacy
+    if requested == "SIMPLE_EXP":
+        atm, realized = _simple()
+        return atm, realized, notes
+
+    atm, realized = _simple()
+    notes.append(f"Atmosphere '{requested}' is not implemented; falling back to SIMPLE_EXP.")
+    return atm, realized, notes
+
+
 def force_cfg_to_dict(
     cfg: ForceModelCfg,
     bundle: Optional[BuiltForceModelBundle] = None,
@@ -125,7 +244,6 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
     from org.orekit.forces.gravity import HolmesFeatherstoneAttractionModel, ThirdBodyAttraction, SolidTides
     from org.orekit.forces.gravity.potential import GravityFieldFactory, TideSystem
     from org.orekit.forces.radiation import SolarRadiationPressure, IsotropicRadiationSingleCoefficient
-    from org.orekit.models.earth.atmosphere import SimpleExponentialAtmosphere
     from org.orekit.time import TimeScalesFactory
     from org.orekit.utils import Constants, IERSConventions
 
@@ -159,29 +277,16 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
     realized_atm = None
 
     if bool(forces.drag_enabled):
-        if requested_atm == "SIMPLE_EXP":
-            atmosphere = SimpleExponentialAtmosphere(
-                earth,
-                float(forces.rho0),
-                float(forces.h0_m),
-                float(forces.h_scale_m),
-            )
-            realized_atm = "SIMPLE_EXP"
-        else:
-            atmosphere = SimpleExponentialAtmosphere(
-                earth,
-                float(forces.rho0),
-                float(forces.h0_m),
-                float(forces.h_scale_m),
-            )
-            realized_atm = "SIMPLE_EXP"
-            notes.append(
-                f"Atmosphere '{requested_atm}' is not implemented yet; "
-                "falling back to SIMPLE_EXP."
-            )
+        atmosphere, realized_atm, atm_notes = _build_atmosphere(
+            earth=earth,
+            sun=sun,
+            forces=forces,
+        )
+        notes.extend(atm_notes)
 
         drag_sensitive = IsotropicDrag(float(forces.area_m2), float(forces.cd0))
         models.append(DragForce(atmosphere, drag_sensitive))
+        notes.append(f"Drag atmosphere realized as {realized_atm}")
 
     # -------------------------
     # SRP
@@ -230,7 +335,6 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
                 moon,
             )
         )
-        notes.append(f"Solid tides enabled with tide_system={str(tide_system)}")
 
     # -------------------------
     # Ocean tides (parked for now)

@@ -22,7 +22,9 @@
     "estimate_cd": false,
     "cr0": 1.5,
     "tide_system": "ZERO_TIDE",
-    "atmosphere": "SIMPLE_EXP",
+    "atmosphere": "NRLMSISE00",
+    "space_weather_source": "AUTO",
+    "msafe_strength": "AVERAGE",
     "rho0": 3.614e-13,
     "h0_m": 500000.0,
     "h_scale_m": 60000.0

@@ -103,32 +103,45 @@ def _get_op_settings(cfg: Dict[str, Any]) -> OpSettings:
     )
 
 
-def run_op(arg_path: str) -> Dict[str, Any]:
-    p = Path(arg_path)
-    if not p.exists():
-        raise FileNotFoundError(p)
-
-    od_solution, cfg, out_dir = _resolve_inputs(p)
+def run_op_loaded(
+    od_solution: Dict[str, Any],
+    cfg: Dict[str, Any],
+    out_dir: Path,
+) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
-
     settings = _get_op_settings(cfg)
 
     # --- Init Orekit ---
-    init_orekit()
+    orekit_data_path = cfg.get("orekit_data_path")
+    extra_data_paths = cfg.get("orekit_extra_data_paths")
+    init_orekit(orekit_data_path, extra_data_paths=extra_data_paths)
 
     # Imports after JVM start
     from org.orekit.time import TimeScalesFactory, AbsoluteDate
     from org.orekit.frames import FramesFactory
     from org.orekit.utils import IERSConventions, Constants, PVCoordinates
     from org.hipparchus.geometry.euclidean.threed import Vector3D
-    from org.orekit.orbits import CartesianOrbit, PositionAngleType
+    from org.orekit.orbits import CartesianOrbit
     from org.orekit.propagation import SpacecraftState
     from org.hipparchus.ode.nonstiff import DormandPrince853Integrator
     from org.orekit.propagation.numerical import NumericalPropagator
     from org.orekit.bodies import OneAxisEllipsoid
 
+    def _get_reference_inertial_frame(name: str):
+        key = str(name or "EME2000").strip().upper()
+
+        if key == "EME2000":
+            return FramesFactory.getEME2000(), "EME2000"
+        
+        if key == "TOD":
+            return FramesFactory.getTOD(IERSConventions.IERS_2010, True), "TOD"
+        
+        raise ValueError(f"Unsupported reference_frame: {name}")
+
+
     utc = TimeScalesFactory.getUTC()
-    inertial = FramesFactory.getEME2000()
+    reference_frame = cfg.get("reference_frame") or od_solution.get("frame_inertial", "EME2000")
+    inertial, inertial_name = _get_reference_inertial_frame(reference_frame)
     itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
 
     earth = OneAxisEllipsoid(
@@ -142,17 +155,33 @@ def run_op(arg_path: str) -> Dict[str, Any]:
 
     mass_kg = float(forces.mass_kg)
 
-    cd_est = od_solution.get("estimated_params", {}).get("cd", None)
-    cd_used = float(cd_est) if cd_est is not None else float(forces.cd0)
+    estimated = od_solution.get("estimated_params", {})
+    cd_est = estimated.get("cd", None)
+    cr_est = estimated.get("cr", None)
 
-    # OP에서는 실제 전파에 사용될 Cd를 force cfg에 반영
-    forces_for_op = replace(forces, cd0=cd_used)
+    cd_used = float(cd_est) if cd_est is not None else float(forces.cd0)
+    cr_used = float(cr_est) if cr_est is not None else float(forces.cr0)
+
+    # OP에서는 실제 전파에 사용될 Cd/Cr를 force cfg에 반영
+    forces_for_op = replace(
+        forces, 
+        cd0=cd_used, 
+        cr0=cr_used,
+        estimate_cd=False,
+        estimate_cr=False,
+    )
 
     # Initial state
     epoch = _parse_iso_utc(str(od_solution["epoch_utc"]))
-    date0 = AbsoluteDate(epoch.year, epoch.month, epoch.day,
-                         epoch.hour, epoch.minute,
-                         epoch.second + epoch.microsecond / 1e6, utc)
+    date0 = AbsoluteDate(
+        epoch.year,
+        epoch.month,
+        epoch.day,
+        epoch.hour,
+        epoch.minute,
+        epoch.second + epoch.microsecond / 1e6,
+        utc,
+    )
 
     r = od_solution["state_inertial"]["r_m"]
     v = od_solution["state_inertial"]["v_mps"]
@@ -168,26 +197,31 @@ def run_op(arg_path: str) -> Dict[str, Any]:
     min_step = 1.0
     max_step = float(max(1, settings.step_s))
     pos_tol = 10.0
-    integrator = DormandPrince853Integrator(min_step, max_step, pos_tol, pos_tol)
 
+    integrator = DormandPrince853Integrator(min_step, max_step, pos_tol, pos_tol)
     propagator = NumericalPropagator(integrator)
     propagator.setInitialState(SpacecraftState(orbit0, mass_kg))
 
     # Force models
     run_notes = []
-
     force_bundle = build_force_model_bundle(
         itrf=itrf,
         earth=earth,
         forces=forces_for_op,
-        )
+    )
     apply_force_models(propagator, force_bundle)
     run_notes.extend(force_bundle.notes or [])
-    
+    run_notes.append(f"Reference inertial frame: {inertial_name}")
+
     if cd_est is not None:
         run_notes.append(f"Using estimated Cd from OD: {cd_used}")
     else:
         run_notes.append(f"Using nominal Cd from force config: {cd_used}")
+
+    if cr_est is not None:
+        run_notes.append(f"Using estimated Cr from OD: {cr_used}")
+    else:
+        run_notes.append(f"Using nominal Cr from force config: {cr_used}")
 
     # Prop window
     start_dt = _parse_iso_utc(settings.time_start_utc) if settings.time_start_utc else epoch
@@ -196,13 +230,18 @@ def run_op(arg_path: str) -> Dict[str, Any]:
     # Generate ephemeris at uniform step
     rows = []
     n_steps = int((stop_dt - start_dt).total_seconds() // settings.step_s)
+
     for k in range(n_steps + 1):
         ts = start_dt + dt.timedelta(seconds=k * settings.step_s)
-        date = AbsoluteDate(ts.year, ts.month, ts.day, ts.hour, ts.minute,
-                            ts.second + ts.microsecond / 1e6, utc)
+        date = AbsoluteDate(
+            ts.year, ts.month, ts.day,
+            ts.hour, ts.minute,
+            ts.second + ts.microsecond / 1e6,
+            utc,
+        )
+
         st = propagator.propagate(date)
         pv_i = st.getPVCoordinates()
-
         ri = pv_i.getPosition()
         vi = pv_i.getVelocity()
 
@@ -213,10 +252,18 @@ def run_op(arg_path: str) -> Dict[str, Any]:
 
         rows.append({
             "iso_utc": ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "x_i_m": float(ri.getX()), "y_i_m": float(ri.getY()), "z_i_m": float(ri.getZ()),
-            "vx_i_mps": float(vi.getX()), "vy_i_mps": float(vi.getY()), "vz_i_mps": float(vi.getZ()),
-            "x_ecef_m": float(re.getX()), "y_ecef_m": float(re.getY()), "z_ecef_m": float(re.getZ()),
-            "vx_ecef_mps": float(ve.getX()), "vy_ecef_mps": float(ve.getY()), "vz_ecef_mps": float(ve.getZ()),
+            "x_i_m": float(ri.getX()),
+            "y_i_m": float(ri.getY()),
+            "z_i_m": float(ri.getZ()),
+            "vx_i_mps": float(vi.getX()),
+            "vy_i_mps": float(vi.getY()),
+            "vz_i_mps": float(vi.getZ()),
+            "x_ecef_m": float(re.getX()),
+            "y_ecef_m": float(re.getY()),
+            "z_ecef_m": float(re.getZ()),
+            "vx_ecef_mps": float(ve.getX()),
+            "vy_ecef_mps": float(ve.getY()),
+            "vz_ecef_mps": float(ve.getZ()),
         })
 
     ephem = pd.DataFrame(rows)
@@ -228,7 +275,7 @@ def run_op(arg_path: str) -> Dict[str, Any]:
     meta = OEMMeta(
         object_name=str(cfg.get("object_name", "SAT")),
         object_id=str(cfg.get("object_id", "UNKNOWN")),
-        ref_frame=str(od_solution.get("frame_inertial", "EME2000")),
+        ref_frame=inertial_name,
         originator="Difference_Drag",
     )
     write_oem_from_ephem_df(ephem, oem_path, meta)
@@ -237,11 +284,13 @@ def run_op(arg_path: str) -> Dict[str, Any]:
         "status": "ok",
         "outputs_dir": str(out_dir),
         "epoch_utc": od_solution["epoch_utc"],
+        "reference_inertial_frame": inertial_name,
         "op_start_utc": start_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "op_stop_utc": stop_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "step_s": int(settings.step_s),
         "points": int(len(ephem)),
         "cd_used": cd_used,
+        "cr_used": cr_used,
         "notes": run_notes,
         "forces": force_cfg_to_dict(forces_for_op, force_bundle),
         "artifacts": {
@@ -250,9 +299,21 @@ def run_op(arg_path: str) -> Dict[str, Any]:
             "op_summary_json": "op_summary.json",
         },
     }
-    (out_dir / "op_summary.json").write_text(json.dumps(op_summary, indent=2), encoding="utf-8")
 
+    (out_dir / "op_summary.json").write_text(
+        json.dumps(op_summary, indent=2),
+        encoding="utf-8",
+    )
     return op_summary
+
+
+def run_op(arg_path: str) -> Dict[str, Any]:
+    p = Path(arg_path)
+    if not p.exists():
+        raise FileNotFoundError(p)
+
+    od_solution, cfg, out_dir = _resolve_inputs(p)
+    return run_op_loaded(od_solution, cfg, out_dir)
 
 
 def main() -> None:

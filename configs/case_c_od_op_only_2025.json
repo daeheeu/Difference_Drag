@@ -14,21 +14,31 @@
   "op": {
     "time_start_utc": "2024-05-01T10:33:32Z",
     "span_hours": 38,
-    "step_s": 1
+    "step_s": 30
   },
+
+  "reference_frame": "TOD",
 
   "forces": {
     "profile": "microcosm_like",
     "mass_kg": 25.7,
-    "area_m2": 0.26392,
+    "area_m2": 0.1200,
     "cd0": 2.2,
     "estimate_cd": false,
+    "cd_min": 1.0,
+    "cd_max": 4.0,
+    "use_srp": true,
     "cr0": 1.5,
-    "tide_system": "ZERO_TIDE",
-    "atmosphere": "NRLMSISE00",
-    "space_weather_source": "AUTO",
-    "msafe_strength": "AVERAGE"
+    "estimate_cr": false,
+    "cr_min": 0.5,
+    "cr_max": 3.0,
+    "gravity_degree": 70,
+    "gravity_order": 70,
+    "use_third_body": true,
+    "drag_enabled": true,
+    "atmosphere": "JB2008",
+    "use_tides": true,
+    "tide_system": "ZERO_TIDE"
   },
-
   "outputs_dir": "outputs"
 }

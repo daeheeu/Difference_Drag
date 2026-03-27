@@ -14,8 +14,13 @@ class ForceModelCfg:
     area_m2: float = 0.052578
     cd0: float = 2.3
 
-    # phase-1/2 policy
+    # estimation policy
     estimate_cd: bool = False
+    estimate_cr: bool = False
+    cd_min: float = 0.5
+    cd_max: float = 5.0
+    cr_min: float = 0.5
+    cr_max: float = 3.0
 
     # gravity / third body
     gravity_degree: int = 20
@@ -131,7 +136,12 @@ def _build_jb2008_provider(*, mgr: Any, utc: Any):
 
 def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
     from org.orekit.data import DataContext
-    from org.orekit.models.earth.atmosphere import SimpleExponentialAtmosphere, DTM2000, NRLMSISE00
+    from org.orekit.models.earth.atmosphere import (
+        SimpleExponentialAtmosphere, 
+        DTM2000, 
+        NRLMSISE00, 
+        JB2008,
+    )
     from org.orekit.models.earth.atmosphere.data import (
         CssiSpaceWeatherData,
         MarshallSolarActivityFutureEstimation,
@@ -209,6 +219,17 @@ def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
         atm, realized = _simple()
         notes.append(f"Atmosphere '{requested}' fell back to SIMPLE_EXP.")
         return atm, realized, notes
+    
+    # JB2008
+    if requested in ("JB2008", "JB2008_SPACEENV"):
+        try:
+            provider = _build_jb2008_provider(mgr=mgr, utc=utc)
+            return JB2008(provider, sun, earth, utc), "JB2008_SPACEENV", notes
+        except Exception as exc:
+            notes.append(f"JB2008 unavailable: {exc}")
+            atm, realized = _simple()
+            notes.append("Atmosphere 'JB2008' fell back to SIMPLE_EXP.")
+            return atm, realized, notes
 
     # legacy
     if requested == "SIMPLE_EXP":
@@ -275,7 +296,7 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
     drag_sensitive = None
     requested_atm = str(forces.atmosphere or "SIMPLE_EXP").strip().upper()
     realized_atm = None
-
+    
     if bool(forces.drag_enabled):
         atmosphere, realized_atm, atm_notes = _build_atmosphere(
             earth=earth,
@@ -283,8 +304,24 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
             forces=forces,
         )
         notes.extend(atm_notes)
+        
+        if bool(forces.estimate_cd):
+            drag_sensitive = IsotropicDrag(
+                float(forces.area_m2),
+                float(forces.cd0),
+                float(forces.cd_min),
+                float(forces.cd_max),
+            )
+            notes.append(
+                f"Cd solve-for enabled: apriori={float(forces.cd0)}, "
+                f"bounds=({float(forces.cd_min)}, {float(forces.cd_max)})"
+            )
+        else:
+            drag_sensitive = IsotropicDrag(
+                float(forces.area_m2),
+                float(forces.cd0),
+            )
 
-        drag_sensitive = IsotropicDrag(float(forces.area_m2), float(forces.cd0))
         models.append(DragForce(atmosphere, drag_sensitive))
         notes.append(f"Drag atmosphere realized as {realized_atm}")
 
@@ -293,8 +330,29 @@ def build_force_model_bundle(*, itrf: Any, earth: Any, forces: ForceModelCfg) ->
     # -------------------------
     radiation_sensitive = None
     if bool(forces.use_srp):
-        srp_area = float(forces.srp_area_m2) if forces.srp_area_m2 is not None else float(forces.area_m2)
-        radiation_sensitive = IsotropicRadiationSingleCoefficient(srp_area, float(forces.cr0))
+        srp_area = (
+            float(forces.srp_area_m2)
+            if forces.srp_area_m2 is not None
+            else float(forces.area_m2)
+        )
+
+        if bool(forces.estimate_cr):
+            radiation_sensitive = IsotropicRadiationSingleCoefficient(
+                srp_area,
+                float(forces.cr0),
+                float(forces.cr_min),
+                float(forces.cr_max),
+            )
+            notes.append(
+                f"Cr solve-for enabled: apriori={float(forces.cr0)}, "
+                f"bounds=({float(forces.cr_min)}, {float(forces.cr_max)})"
+            )
+        else:
+            radiation_sensitive = IsotropicRadiationSingleCoefficient(
+                srp_area,
+                float(forces.cr0),
+            )
+
         models.append(SolarRadiationPressure(sun, earth, radiation_sensitive))
         notes.append(f"SRP enabled with area={srp_area} m^2, Cr={float(forces.cr0)}")
 

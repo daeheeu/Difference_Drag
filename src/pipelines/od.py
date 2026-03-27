@@ -83,6 +83,7 @@ class ODRunCfg:
 
     # Optional
     orekit_data_path: Optional[str] = None
+    reference_frame: str = "EME2000"
 
     # Solver knobs
     max_iterations: int = 300
@@ -368,6 +369,7 @@ def _parse_run_cfg(cfg_raw: Dict[str, Any]) -> ODRunCfg:
 
     outputs_dir = str(cfg_raw.get("outputs_dir", "outputs"))
     orekit_data_path = cfg_raw.get("orekit_data_path")
+    reference_frame = str(cfg_raw.get("reference_frame", "EME2000"))
 
     max_iterations = int(cfg_raw.get("max_iterations", 300))
     max_evaluations = int(cfg_raw.get("max_evaluations", 8000))
@@ -379,6 +381,7 @@ def _parse_run_cfg(cfg_raw: Dict[str, Any]) -> ODRunCfg:
         forces=forces,
         outputs_dir=outputs_dir,
         orekit_data_path=orekit_data_path,
+        reference_frame=reference_frame,
         max_iterations=max_iterations,
         max_evaluations=max_evaluations,
     )
@@ -411,6 +414,19 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     from org.orekit.estimation.leastsquares import BatchLSEstimator
     from org.orekit.estimation.measurements import ObservableSatellite, Position
     from org.hipparchus.geometry.euclidean.threed import Vector3D
+    from org.orekit.forces.drag import DragSensitive
+    from org.orekit.forces.radiation import RadiationSensitive
+
+    def _get_reference_inertial_frame(name: str):
+        key = str(name or "EME2000").strip().upper()
+
+        if key == "EME2000":
+            return FramesFactory.getEME2000(), "EME2000"
+        if key == "TOD":
+            return FramesFactory.getTOD(IERSConventions.IERS_2010, True), "TOD"
+        
+        raise ValueError(f"Unsupported reference_frame: {name}")
+
 
     # Load navsol
     df = load_navsol(cfg.navsol_csv)
@@ -424,7 +440,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
 
     # Frames
     utc = TimeScalesFactory.getUTC()
-    inertial = FramesFactory.getEME2000()
+    inertial, inertial_name = _get_reference_inertial_frame(cfg.reference_frame)
     itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
 
     earth = OneAxisEllipsoid(
@@ -473,6 +489,22 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     builder = NumericalPropagatorBuilder(orbit0, integ_builder, PositionAngleType.TRUE, 1000.0)
     builder.setMass(float(cfg.forces.mass_kg))
 
+    def _find_driver_by_name(drivers, target_name: str):
+        try:
+            n = drivers.size()
+            items = [drivers.get(i) for i in range(n)]
+        except Exception:
+            items = list(drivers)
+
+        for drv in items:
+            if drv.getName() == target_name:
+                return drv
+            
+        names = [drv.getName() for drv in items]
+        raise RuntimeError(
+            f"ParameterDriver '{target_name}' not found. Available drivers={names}"
+        )
+
     # Force models
     run_notes: List[str] = []
 
@@ -483,15 +515,46 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     )
     apply_force_models(builder, force_bundle)
     run_notes.extend(force_bundle.notes or [])
+    run_notes.append(f"Reference inertial frame: {inertial_name}")
 
-    # Phase-1 policy:
-    # direct constant-Cd estimation is intentionally parked.
-    # We keep the config flag for compatibility, but do not select drag drivers here.
-    if bool(cfg.forces.estimate_cd):
-        run_notes.append(
-            "estimate_cd was requested, but direct constant-Cd estimation "
-            "is intentionally disabled in phase-1."
-        )    
+    def _driver0(drivers):
+        try:
+            return drivers.get(0)
+        except Exception:
+            return drivers[0]
+        
+    cd_driver = None
+    cr_driver = None
+
+    # Cd solve-for
+    if bool(getattr(cfg.forces, "estimate_cd", False)):
+        if force_bundle.drag_sensitive is None:
+            run_notes.append("estimate_cd=true but drag_sensitive is None; Cd solve-for skipped.")
+        else:
+            cd_driver = _find_driver_by_name(
+                force_bundle.drag_sensitive.getDragParametersDrivers(),
+                DragSensitive.DRAG_COEFFICIENT,
+            )
+            cd_driver.setSelected(True)
+            run_notes.append(
+                f"Cd solve-for active: apriori={cd_driver.getValue()} "
+                f"bounds=({cd_driver.getMinValue()}, {cd_driver.getMaxValue()})"
+            )
+
+    # Cr solve-for
+    if bool(getattr(cfg.forces, "estimate_cr", False)):
+        if force_bundle.radiation_sensitive is None:
+            run_notes.append("estimate_cr=true but radiation_sensitive is None; Cr solve-for skipped.")
+        else:
+            cr_driver = _find_driver_by_name(
+                force_bundle.radiation_sensitive.getRadiationParametersDrivers(),
+                RadiationSensitive.REFLECTION_COEFFICIENT,
+            )
+            cr_driver.setSelected(True)
+            run_notes.append(
+                f"Cr solve-for active: apriori={cr_driver.getValue()} "
+                f"bounds=({cr_driver.getMinValue()}, {cr_driver.getMaxValue()})"
+            )
 
     # Estimator
     estimator = BatchLSEstimator(LevenbergMarquardtOptimizer(), builder)
@@ -515,8 +578,9 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     estimated = estimator.estimate()  # Java array of Propagator
     prop = estimated[0]
 
-    # Estimated Cd
-    cd_est = None
+    # Estimated drag / SRP coefficients
+    cd_est = float(cd_driver.getValue()) if cd_driver is not None else None
+    cr_est = float(cr_driver.getValue()) if cr_driver is not None else None
 
     # State at reference epoch
     st_ref = prop.propagate(t_ref)
@@ -562,7 +626,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     # Outputs
     od_solution = {
         "epoch_utc": t_ref_ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "frame_inertial": "EME2000",
+        "frame_inertial": inertial_name,
         "frame_ecef": "ITRF",  # with IERS_2010 conventions
         "state_inertial": {
             "r_m": [float(ri.getX()), float(ri.getY()), float(ri.getZ())],
@@ -572,7 +636,10 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
             "r_m": [float(re.getX()), float(re.getY()), float(re.getZ())],
             "v_mps": [float(ve.getX()), float(ve.getY()), float(ve.getZ())],
         },
-        "estimated_params": {"cd": cd_est},
+        "estimated_params": {
+            "cd": cd_est,
+            "cr": cr_est,
+        },
         "forces": force_cfg_to_dict(cfg.forces, force_bundle),
         "od_window": {
             "arc_gap_s": float(cfg.arc_gap_s),
@@ -610,6 +677,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
         "od_fit_p95_m": od_p95,
         "od_fit_max_m": od_max,
         "estimated_cd": cd_est,
+        "estimated_cr": cr_est,
         "notes": run_notes,
         "artifacts": {
             "od_solution_json": "od_solution.json",

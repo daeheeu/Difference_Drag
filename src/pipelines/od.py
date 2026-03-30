@@ -83,6 +83,7 @@ class ODRunCfg:
 
     # Optional
     orekit_data_path: Optional[str] = None
+    orekit_extra_data_paths: Optional[List[str]] = None
     reference_frame: str = "EME2000"
 
     # Solver knobs
@@ -369,6 +370,7 @@ def _parse_run_cfg(cfg_raw: Dict[str, Any]) -> ODRunCfg:
 
     outputs_dir = str(cfg_raw.get("outputs_dir", "outputs"))
     orekit_data_path = cfg_raw.get("orekit_data_path")
+    orekit_extra_data_paths = cfg_raw.get("orekit_extra_data_paths")
     reference_frame = str(cfg_raw.get("reference_frame", "EME2000"))
 
     max_iterations = int(cfg_raw.get("max_iterations", 300))
@@ -381,6 +383,7 @@ def _parse_run_cfg(cfg_raw: Dict[str, Any]) -> ODRunCfg:
         forces=forces,
         outputs_dir=outputs_dir,
         orekit_data_path=orekit_data_path,
+        orekit_extra_data_paths=orekit_extra_data_paths,
         reference_frame=reference_frame,
         max_iterations=max_iterations,
         max_evaluations=max_evaluations,
@@ -399,7 +402,10 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # JVM + orekit-data
-    init_orekit(cfg.orekit_data_path)
+    init_orekit(
+        cfg.orekit_data_path,
+        extra_data_paths=cfg.orekit_extra_data_paths,
+    )
 
     # Orekit imports AFTER init_orekit()
     from org.hipparchus.optim.nonlinear.vector.leastsquares import LevenbergMarquardtOptimizer

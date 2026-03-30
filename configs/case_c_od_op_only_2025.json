@@ -36,9 +36,20 @@
     "gravity_order": 70,
     "use_third_body": true,
     "drag_enabled": true,
-    "atmosphere": "JB2008",
+    "atmosphere": "JACCHIA71",
+    "j71_f107_avg": 150.0,
+    "j71_f107_daily": 150.0,
+    "j71_kp_3h": 2.0,
+    "j71_base_density_mode": "SMOKE_EXP",
+    "rho0": 3.614e-13,
+    "h0_m": 500000.0,
+    "h_scale_m": 60000.0,
     "use_tides": true,
     "tide_system": "ZERO_TIDE"
   },
-  "outputs_dir": "outputs"
+  "outputs_dir": "outputs",
+  "orekit_extra_data_paths": [
+    "data/eop",
+    "data/space-weather"
+  ]
 }

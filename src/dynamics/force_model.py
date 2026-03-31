@@ -36,11 +36,16 @@ class ForceModelCfg:
     h0_m: float = 500000.0
     h_scale_m: float = 60000.0
 
-    # J71 provisional external drivers
+    # J71 external drivers
     j71_f107_avg: float = 150.0
     j71_f107_daily: float = 150.0
     j71_kp_3h: float = 2.0
     j71_base_density_mode: str = "SMOKE_EXP"
+
+    # J71 driver chain
+    j71_driver_mode: str = "FIXED"   # FIXED | CSV
+    j71_space_weather_csv: Optional[str] = None
+    j71_driver_max_age_days: float = 2.0
 
     # SRP
     use_srp: bool = False
@@ -200,8 +205,10 @@ def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
                 "J71 provisional inputs: "
                 f"F107_avg={float(forces.j71_f107_avg)}, "
                 f"F107_daily={float(forces.j71_f107_daily)}, "
-                f"Kp3h={float(forces.j71_kp_3h)},"
-                f"base_density_mode={str(forces.j71_base_density_mode)}"
+                f"Kp3h={float(forces.j71_kp_3h)}, "
+                f"base_density_mode={str(forces.j71_base_density_mode)}, "
+                f"driver_mode={str(forces.j71_driver_mode)}, "
+                f"space_weather_csv={str(forces.j71_space_weather_csv)}"
             )
             return atmosphere, "JACCHIA71_CUSTOM", notes
         except Exception as exc:

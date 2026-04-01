@@ -83,6 +83,40 @@ class Jacchia71DensityKernel:
         self._utc = TimeScalesFactory.getUTC()
         self._space_weather_rows = self._load_space_weather_rows()
 
+    def describe_driver(self) -> str:
+        mode = str(self.cfg.driver_mode).strip().upper()
+
+        if mode == "FIXED":
+            return (
+                "J71 driver FIXED: "
+                f"F107_avg={float(self.cfg.f107_avg)}, "
+                f"F107_daily={float(self.cfg.f107_daily)}, "
+                f"Kp3h={float(self.cfg.kp_3h)}"
+            )
+
+        if mode == "CSV":
+            if not self._space_weather_rows:
+                return (
+                    "J71 driver CSV loaded: "
+                    f"rows=0, "
+                    f"path={str(self.cfg.space_weather_csv)}, "
+                    f"max_age_days={float(self.cfg.driver_max_age_days)}"
+                )
+
+            first = self._space_weather_rows[0]
+            last = self._space_weather_rows[-1]
+
+            return (
+                "J71 driver CSV loaded: "
+                f"rows={len(self._space_weather_rows)}, "
+                f"first={first.iso_utc}, "
+                f"last={last.iso_utc}, "
+                f"path={str(self.cfg.space_weather_csv)}, "
+                f"max_age_days={float(self.cfg.driver_max_age_days)}"
+            )
+
+        return f"J71 driver unknown: mode={self.cfg.driver_mode}"
+
     def density_kg_m3(self, date: Any, position: Any, frame: Any) -> float:
         j71 = self._build_inputs(date, position, frame)
 
@@ -604,6 +638,9 @@ class Jacchia71Atmosphere:
         self._earth = earth
         self._sun = sun
         self._kernel = kernel
+
+    def get_debug_driver_summary(self) -> str:
+        return self._kernel.describe_driver()
 
     @JOverride
     def getFrame(self):

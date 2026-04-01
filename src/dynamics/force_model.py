@@ -201,15 +201,27 @@ def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
                 sun=sun,
                 forces=forces,
             )
+
+            driver_summary_fn = getattr(atmosphere, "get_debug_driver_summary", None)
+            if callable(driver_summary_fn):
+                notes.append(driver_summary_fn())
+            else:
+                notes.append(
+                    "J71 driver summary unavailable: "
+                    f"driver_mode={str(forces.j71_driver_mode)}, "
+                    f"space_weather_csv={str(forces.j71_space_weather_csv)}, "
+                    f"max_age_days={float(forces.j71_driver_max_age_days)}"
+                )
+            
             notes.append(
-                "J71 provisional inputs: "
-                f"F107_avg={float(forces.j71_f107_avg)}, "
-                f"F107_daily={float(forces.j71_f107_daily)}, "
-                f"Kp3h={float(forces.j71_kp_3h)}, "
+                "J71 density settings: "
                 f"base_density_mode={str(forces.j71_base_density_mode)}, "
-                f"driver_mode={str(forces.j71_driver_mode)}, "
-                f"space_weather_csv={str(forces.j71_space_weather_csv)}"
+                f"fallback_fixed=("
+                f"{float(forces.j71_f107_avg)}, "
+                f"{float(forces.j71_f107_daily)}, "
+                f"{float(forces.j71_kp_3h)})"
             )
+            
             return atmosphere, "JACCHIA71_CUSTOM", notes
         except Exception as exc:
             raise RuntimeError(f"JACCHIA71 requested but unavailable: {exc}") from exc

@@ -92,6 +92,18 @@ class Inputs:
     outputs_dir: Optional[Path] = None
     ephem_path: Optional[Path] = None
     navsol_path: Optional[Path] = None
+    reference_frame: Optional[str] = None
+    reference_frame_source: Optional[str] = None
+
+
+def _pick_reference_frame_from_op_summary(op_summary_path: Path) -> Optional[str]:
+    if not op_summary_path.exists():
+        return None
+    try:
+        d = _load_json(op_summary_path)
+        return d.get("reference_inertial_frame")
+    except Exception:
+        return None
 
 
 def _resolve_inputs(argv: List[str]) -> Inputs:
@@ -99,12 +111,25 @@ def _resolve_inputs(argv: List[str]) -> Inputs:
     if len(argv) >= 3 and argv[1].lower().endswith(".csv"):
         ephem = Path(argv[1])
         nav = Path(argv[2])
-        return Inputs(mode="files", ephem_path=ephem, navsol_path=nav, outputs_dir=ephem.parent)
+        out_dir = ephem.parent
+
+        op_summary_path = out_dir / "op_summary.json"
+        ref_from_summary = _pick_reference_frame_from_op_summary(op_summary_path)
+
+        return Inputs(
+            mode="files",
+            ephem_path=ephem,
+            navsol_path=nav,
+            outputs_dir=out_dir,
+            reference_frame=ref_from_summary or "EME2000",
+            reference_frame_source="op_summary.json" if ref_from_summary else "default",
+        )
 
     # Config mode
     cfg_path = Path(argv[1])
     cfg = _load_json(cfg_path)
     out_dir = Path(cfg.get("outputs_dir", "outputs"))
+
     # locate ephemeris
     ephem = out_dir / "op_ephemeris.csv"
     if not ephem.exists():
@@ -112,11 +137,33 @@ def _resolve_inputs(argv: List[str]) -> Inputs:
         legacy = out_dir / "case_c_op_ephemeris.csv"
         if legacy.exists():
             ephem = legacy
+
     # locate navsol day2
     inp = cfg.get("inputs", {}) if isinstance(cfg, dict) else {}
     nav = inp.get("navsol_day2_csv") or cfg.get("navsol_day2_csv")
     nav_path = Path(nav) if nav else None
-    return Inputs(mode="config", cfg=cfg, outputs_dir=out_dir, ephem_path=ephem, navsol_path=nav_path)
+
+    op_summary_path = out_dir / "op_summary.json"
+    ref_from_summary = _pick_reference_frame_from_op_summary(op_summary_path)
+    ref_from_cfg = cfg.get("reference_frame")
+
+    ref = ref_from_summary or ref_from_cfg or "EME2000"
+    if ref_from_summary:
+        ref_src = "op_summary.json"
+    elif ref_from_cfg:
+        ref_src = "config"
+    else:
+        ref_src = "default"
+
+    return Inputs(
+        mode="config",
+        cfg=cfg,
+        outputs_dir=out_dir,
+        ephem_path=ephem,
+        navsol_path=nav_path,
+        reference_frame=ref,
+        reference_frame_source=ref_src,
+    )
 
 
 def _interp_series(t_src: np.ndarray, y_src: np.ndarray, t_q: np.ndarray) -> np.ndarray:
@@ -137,6 +184,21 @@ def _ric_components(r: np.ndarray, v: np.ndarray, dr: np.ndarray) -> Tuple[float
     eC = h / h_norm
     eI = np.cross(eC, eR)
     return float(np.dot(eR, dr)), float(np.dot(eI, dr)), float(np.dot(eC, dr))
+
+
+def _get_reference_inertial_frame(name: Optional[str]):
+    from org.orekit.frames import FramesFactory
+    from org.orekit.utils import IERSConventions
+
+    key = str(name or "EME2000").strip().upper()
+
+    if key == "EME2000":
+        return FramesFactory.getEME2000(), "EME2000"
+
+    if key == "TOD":
+        return FramesFactory.getTOD(IERSConventions.IERS_2010, True), "TOD"
+
+    raise ValueError(f"Unsupported reference_frame for validate: {name}")
 
 
 def run_validate(argv: List[str]) -> Dict[str, Any]:
@@ -192,7 +254,7 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
     from org.hipparchus.geometry.euclidean.threed import Vector3D
 
     utc = TimeScalesFactory.getUTC()
-    inertial = FramesFactory.getEME2000()
+    inertial, inertial_name = _get_reference_inertial_frame(inp.reference_frame)
     itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
 
     # Build interpolation arrays
@@ -295,6 +357,8 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
         "outputs_dir": str(out_dir),
         "op_ephemeris_csv": str(ephem_path),
         "navsol_day2_csv": str(navsol_path),
+        "reference_inertial_frame": inertial_name,
+        "reference_inertial_frame_source": inp.reference_frame_source,
         "points_compared": int(len(out_df)),
         "pos_3d": {"rms_m": rms, "p95_m": p95, "max_m": mx},
         "ric": {"radial": _stat(r_list), "intrack": _stat(i_list), "crosstrack": _stat(c_list)},

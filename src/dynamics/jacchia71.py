@@ -35,6 +35,7 @@ class Jacchia71Cfg:
     rho_ref_kg_m3: float = 3.614e-13
     h_ref_km: float = 500.0
     h_scale_km: float = 60.0
+    density_scale: float = 1.0
 
     # driver chain
     driver_mode: str = "FIXED"   # FIXED | CSV
@@ -618,6 +619,9 @@ class Jacchia71DensityKernel:
         where:
         - first bracket term is total density in g/cm^3
         - outer 10^3 converts g/cm^3 -> kg/m^3
+
+        Diagnostic extension in this project:
+        - final density is multiplied by cfg.density_scale
         """
         helium_c = 0.6646e-23
 
@@ -625,6 +629,8 @@ class Jacchia71DensityKernel:
         helium_term_g_cm3 = (10.0 ** float(q1)) * ((10.0 ** float(q2)) - 1.0) * helium_c
 
         rho_kg_m3 = 1.0e3 * (main_term_g_cm3 + helium_term_g_cm3)
+        rho_kg_m3 *= float(self.cfg.density_scale)
+
         return max(rho_kg_m3, 1.0e-30) 
     
 
@@ -725,6 +731,7 @@ def build_jacchia71_atmosphere(*, earth: Any, sun: Any, forces: Any) -> Any:
         rho_ref_kg_m3=float(getattr(forces, "rho0", 3.614e-13)),
         h_ref_km=float(getattr(forces, "h0_m", 500000.0)) / 1000.0,
         h_scale_km=float(getattr(forces, "h_scale_m", 60000.0)) / 1000.0,
+        density_scale=float(getattr(forces, "j71_density_scale", 1.0)),
         driver_mode=str(getattr(forces, "j71_driver_mode", "FIXED")),
         space_weather_csv=getattr(forces, "j71_space_weather_csv", None),
         driver_max_age_days=float(getattr(forces, "j71_driver_max_age_days", 2.0)),

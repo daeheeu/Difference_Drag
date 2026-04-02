@@ -46,7 +46,7 @@
     "j71_f107_daily": 150.0,
     "j71_kp_3h": 2.0,
     "j71_base_density_mode": "TABLE87_3",
-    "j71_density_scale": 1.0,
+    "j71_density_scale": 2.05,
     "j71_driver_mode": "CSV",
     "j71_space_weather_csv": "data/j71_space_weather_20240501_0503.csv",
     "j71_driver_max_age_days": 2.0,
@@ -59,7 +59,7 @@
     "tide_system": "ZERO_TIDE"
   },
 
-  "outputs_dir": "outputs",
+  "outputs_dir": "outputs_j71_rho205",
 
   "orekit_extra_data_paths": [
     "data/eop",

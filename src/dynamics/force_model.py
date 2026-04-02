@@ -47,6 +47,9 @@ class ForceModelCfg:
     j71_space_weather_csv: Optional[str] = None
     j71_driver_max_age_days: float = 2.0
 
+    # J71 density diagnostic scale
+    j71_density_scale: float = 1.0
+
     # SRP
     use_srp: bool = False
     cr0: float = 1.5
@@ -216,12 +219,13 @@ def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
             notes.append(
                 "J71 density settings: "
                 f"base_density_mode={str(forces.j71_base_density_mode)}, "
+                f"density_scale={float(forces.j71_density_scale)}, "
                 f"fallback_fixed=("
                 f"{float(forces.j71_f107_avg)}, "
                 f"{float(forces.j71_f107_daily)}, "
                 f"{float(forces.j71_kp_3h)})"
             )
-            
+
             return atmosphere, "JACCHIA71_CUSTOM", notes
         except Exception as exc:
             raise RuntimeError(f"JACCHIA71 requested but unavailable: {exc}") from exc

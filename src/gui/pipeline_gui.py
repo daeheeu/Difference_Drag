@@ -338,6 +338,7 @@ class PipelineGUI(tk.Tk):
         cfg: Dict[str, Any] = {
             "inputs": {},
             "arc_gap_s": _safe_float(self.var_arc_gap.get(), 60.0),
+            "reference_frame": "TOD",
             "od": {
                 "arc_mode": self.var_arc_mode.get(),
                 "anchor": self.var_anchor.get(),

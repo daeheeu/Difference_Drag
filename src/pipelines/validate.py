@@ -92,18 +92,6 @@ class Inputs:
     outputs_dir: Optional[Path] = None
     ephem_path: Optional[Path] = None
     navsol_path: Optional[Path] = None
-    reference_frame: Optional[str] = None
-    reference_frame_source: Optional[str] = None
-
-
-def _pick_reference_frame_from_op_summary(op_summary_path: Path) -> Optional[str]:
-    if not op_summary_path.exists():
-        return None
-    try:
-        d = _load_json(op_summary_path)
-        return d.get("reference_inertial_frame")
-    except Exception:
-        return None
 
 
 def _resolve_inputs(argv: List[str]) -> Inputs:
@@ -172,21 +160,6 @@ def _ric_components(r: np.ndarray, v: np.ndarray, dr: np.ndarray) -> Tuple[float
     eC = h / h_norm
     eI = np.cross(eC, eR)
     return float(np.dot(eR, dr)), float(np.dot(eI, dr)), float(np.dot(eC, dr))
-
-
-def _get_reference_inertial_frame(name: Optional[str]):
-    from org.orekit.frames import FramesFactory
-    from org.orekit.utils import IERSConventions
-
-    key = str(name or "EME2000").strip().upper()
-
-    if key == "EME2000":
-        return FramesFactory.getEME2000(), "EME2000"
-
-    if key == "TOD":
-        return FramesFactory.getTOD(IERSConventions.IERS_2010, True), "TOD"
-
-    raise ValueError(f"Unsupported reference_frame for validate: {name}")
 
 
 def run_validate(argv: List[str]) -> Dict[str, Any]:
@@ -278,12 +251,6 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
             "Run 'Run OD' then 'Run OP' for the same day1/day2 pair, then retry Verify."
         )
 
-    t_q = nav_sel["t_dt"].astype("int64").to_numpy() / 1e9
-
-    # limit to ephem range
-    t_min, t_max = float(t_src[0]), float(t_src[-1])
-    mask = (t_q >= t_min) & (t_q <= t_max)
-    nav_sel = nav_sel.loc[mask].reset_index(drop=True)
     t_q = nav_sel["t_dt"].astype("int64").to_numpy() / 1e9
 
     cols = [

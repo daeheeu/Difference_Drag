@@ -673,17 +673,46 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
         json.dumps(od_solution, indent=2), encoding="utf-8"
     )
     od_fit.to_csv(out_dir / "od_fit.csv", index=False, encoding="utf-8-sig")
+    
+    od_arc_start_utc = pd.to_datetime(od_df["dt"].iloc[0], utc=True).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    od_arc_end_utc = pd.to_datetime(od_df["dt"].iloc[-1], utc=True).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     od_summary = {
         "status": "ok",
         "navsol_csv": str(cfg.navsol_csv),
         "outputs_dir": str(out_dir),
+
+        # OD block
+        "od_arc_start_utc": od_arc_start_utc,
+        "od_arc_end_utc": od_arc_end_utc,
+        "od_epoch_utc": t_ref_ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "reference_inertial_frame": inertial_name,
+
         "od_points": int(len(od_df)),
+        "mass_kg": float(cfg.forces.mass_kg),
+        "area_m2": float(cfg.forces.area_m2),
+        "gravity_degree": int(cfg.forces.gravity_degree),
+        "gravity_order": int(cfg.forces.gravity_order),
+        "atmosphere_requested": str(cfg.forces.atmosphere),
+
+        "cd_mode": "estimated" if cd_est is not None else "fixed",
+        "cr_mode": "estimated" if cr_est is not None else "fixed",
+        "apriori_cd": float(cfg.forces.cd0),
+        "apriori_cr": float(cfg.forces.cr0),
+        "estimated_cd": cd_est,
+        "estimated_cr": cr_est,
+
+        # current DD/Orekit metric
         "od_fit_rms_m": od_rms,
         "od_fit_p95_m": od_p95,
         "od_fit_max_m": od_max,
-        "estimated_cd": cd_est,
-        "estimated_cr": cr_est,
+
+        # MicroCosm-style alias
+        "od_fit_weighted_rms": od_rms,
+        "microcosm_weighted_rms_like": od_rms,
+        "od_epoch_state_rms_pos_m": None,
+        "od_epoch_state_rms_vel_mps": None,
+
         "notes": run_notes,
         "artifacts": {
             "od_solution_json": "od_solution.json",
@@ -691,6 +720,7 @@ def run_od(cfg_raw: Dict[str, Any]) -> Dict[str, Any]:
             "od_summary_json": "od_summary.json",
         },
     }
+    
     (out_dir / "od_summary.json").write_text(
         json.dumps(od_summary, indent=2), encoding="utf-8"
     )

@@ -437,8 +437,10 @@ class PipelineGUI(tk.Tk):
                 if do_op:
                     self._emit("OP started...", "INFO")
                     op_summary = run_op_pipeline(str(cfg_path))
+                    op_points = op_summary.get("op_points", op_summary.get("points"))
+                    op_frame = op_summary.get("reference_inertial_frame", "UNKNOWN")
                     self._emit(
-                        f"OP done. points={op_summary.get('op_points')}, step_s={op_summary.get('step_s')}",
+                        f"OP done. points={op_points}, step_s={op_summary.get('step_s')}, frame={op_frame}",
                         "INFO",
                     )
                 elif do_verify:
@@ -452,18 +454,44 @@ class PipelineGUI(tk.Tk):
                     self._emit("Verify started...", "INFO")
                     v_summary = run_verify_pipeline(["validate", str(cfg_path)])
                     if v_summary.get("validated"):
-                        # validate.py returns stats under pos_3d and ric
-                        pos3d = v_summary.get("pos_3d", {}) if isinstance(v_summary, dict) else {}
-                        rms = pos3d.get("rms_m", None)
-                        p95 = pos3d.get("p95_m", None)
-                        mx  = pos3d.get("max_m", None)
                         npt = v_summary.get("points_compared", None)
 
+                        # Prefer flat aliases first
+                        rms = v_summary.get("validate_pos_3d_rms_m", None)
+                        p95 = v_summary.get("validate_pos_3d_p95_m", None)
+                        mx  = v_summary.get("validate_pos_3d_max_m", None)
+
                         if rms is None:
-                            # fall back to showing the whole summary keys
-                            self._emit("Verify done, but RMS not available in summary (check validate_summary.json).", "WARN")
+                            pos3d = v_summary.get("pos_3d", {}) if isinstance(v_summary, dict) else {}
+                            rms = pos3d.get("rms_m", None)
+                            p95 = pos3d.get("p95_m", None)
+                            mx  = pos3d.get("max_m", None)
+
+                        intrack_rms = v_summary.get("validate_ric_intrack_rms_m", None)
+                        if intrack_rms is None:
+                            ric = v_summary.get("ric", {}) if isinstance(v_summary, dict) else {}
+                            intrack_rms = ((ric.get("intrack") or {}).get("rms_m"))
+
+                        frame = v_summary.get("reference_inertial_frame", "UNKNOWN")
+                        compare_target = v_summary.get("compare_target", "UNKNOWN")
+
+                        if rms is None:
+                            self._emit(
+                                "Verify done, but RMS not available in summary (check validate_summary.json).",
+                                "WARN",
+                            )
                         else:
-                            msg = f"Verify done. points={npt}, 3D RMS={rms:.3f} m, p95={p95:.3f} m, max={mx:.3f} m"
+                            if intrack_rms is None:
+                                msg = (
+                                    f"Verify done. points={npt}, frame={frame}, target={compare_target}, "
+                                    f"3D RMS={rms:.3f} m, p95={p95:.3f} m, max={mx:.3f} m"
+                                )
+                            else:
+                                msg = (
+                                    f"Verify done. points={npt}, frame={frame}, target={compare_target}, "
+                                    f"3D RMS={rms:.3f} m, p95={p95:.3f} m, max={mx:.3f} m, "
+                                    f"I-RMS={intrack_rms:.3f} m"
+                                )
                             self._emit(msg, "INFO")
                     else:
                         self._emit(f"Verify skipped/failed: {v_summary.get('reason')}", "WARN")

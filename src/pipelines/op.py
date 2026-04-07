@@ -283,14 +283,31 @@ def run_op_loaded(
     op_summary = {
         "status": "ok",
         "outputs_dir": str(out_dir),
+
+        # OP block
         "epoch_utc": od_solution["epoch_utc"],
         "reference_inertial_frame": inertial_name,
         "op_start_utc": start_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "op_stop_utc": stop_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "step_s": int(settings.step_s),
+
+        # alias for GUI / report
         "points": int(len(ephem)),
+        "op_points": int(len(ephem)),
+
+        "mass_kg": mass_kg,
+        "area_m2": float(forces_for_op.area_m2),
+        "gravity_degree": int(forces_for_op.gravity_degree),
+        "gravity_order": int(forces_for_op.gravity_order),
+        "atmosphere_requested": str(forces_for_op.atmosphere),
+
+        "cd_mode": "from_od" if cd_est is not None else "fixed",
+        "cr_mode": "from_od" if cr_est is not None else "fixed",
+        "apriori_cd": float(forces.cd0),
+        "apriori_cr": float(forces.cr0),
         "cd_used": cd_used,
         "cr_used": cr_used,
+
         "notes": run_notes,
         "forces": force_cfg_to_dict(forces_for_op, force_bundle),
         "artifacts": {

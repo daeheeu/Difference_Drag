@@ -111,25 +111,12 @@ def _resolve_inputs(argv: List[str]) -> Inputs:
     if len(argv) >= 3 and argv[1].lower().endswith(".csv"):
         ephem = Path(argv[1])
         nav = Path(argv[2])
-        out_dir = ephem.parent
-
-        op_summary_path = out_dir / "op_summary.json"
-        ref_from_summary = _pick_reference_frame_from_op_summary(op_summary_path)
-
-        return Inputs(
-            mode="files",
-            ephem_path=ephem,
-            navsol_path=nav,
-            outputs_dir=out_dir,
-            reference_frame=ref_from_summary or "EME2000",
-            reference_frame_source="op_summary.json" if ref_from_summary else "default",
-        )
+        return Inputs(mode="files", ephem_path=ephem, navsol_path=nav, outputs_dir=ephem.parent)
 
     # Config mode
     cfg_path = Path(argv[1])
     cfg = _load_json(cfg_path)
     out_dir = Path(cfg.get("outputs_dir", "outputs"))
-
     # locate ephemeris
     ephem = out_dir / "op_ephemeris.csv"
     if not ephem.exists():
@@ -137,33 +124,34 @@ def _resolve_inputs(argv: List[str]) -> Inputs:
         legacy = out_dir / "case_c_op_ephemeris.csv"
         if legacy.exists():
             ephem = legacy
-
     # locate navsol day2
     inp = cfg.get("inputs", {}) if isinstance(cfg, dict) else {}
     nav = inp.get("navsol_day2_csv") or cfg.get("navsol_day2_csv")
     nav_path = Path(nav) if nav else None
+    return Inputs(mode="config", cfg=cfg, outputs_dir=out_dir, ephem_path=ephem, navsol_path=nav_path)
 
-    op_summary_path = out_dir / "op_summary.json"
-    ref_from_summary = _pick_reference_frame_from_op_summary(op_summary_path)
-    ref_from_cfg = cfg.get("reference_frame")
 
-    ref = ref_from_summary or ref_from_cfg or "EME2000"
-    if ref_from_summary:
-        ref_src = "op_summary.json"
-    elif ref_from_cfg:
-        ref_src = "config"
-    else:
-        ref_src = "default"
+def _load_op_summary_near_ephem(ephem_path: Path) -> Tuple[Dict[str, Any], str]:
+    candidates = [
+        ephem_path.parent / "op_summary.json",
+        ephem_path.parent / "case_c_op_summary.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            return _load_json(p), p.name
+    return {}, "default(EME2000)"
 
-    return Inputs(
-        mode="config",
-        cfg=cfg,
-        outputs_dir=out_dir,
-        ephem_path=ephem,
-        navsol_path=nav_path,
-        reference_frame=ref,
-        reference_frame_source=ref_src,
-    )
+
+def _get_reference_inertial_frame(FramesFactory, IERSConventions, name: str):
+    key = str(name or "EME2000").strip().upper()
+
+    if key == "EME2000":
+        return FramesFactory.getEME2000(), "EME2000"
+
+    if key == "TOD":
+        return FramesFactory.getTOD(IERSConventions.IERS_2010, True), "TOD"
+
+    raise ValueError(f"Unsupported reference_inertial_frame for validate: {name}")
 
 
 def _interp_series(t_src: np.ndarray, y_src: np.ndarray, t_q: np.ndarray) -> np.ndarray:
@@ -247,19 +235,34 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
     nav_sel = _select_arcs(nav, gap_s, arc_indices)
 
     # Initialize orekit for ECEF->inertial transform (for RIC error)
-    init_orekit()
+    orekit_data_path = inp.cfg.get("orekit_data_path") if inp.cfg else None
+    extra_data_paths = inp.cfg.get("orekit_extra_data_paths") if inp.cfg else None
+    init_orekit(orekit_data_path, extra_data_paths=extra_data_paths)
+
     from org.orekit.time import TimeScalesFactory, AbsoluteDate
     from org.orekit.frames import FramesFactory
     from org.orekit.utils import IERSConventions
     from org.hipparchus.geometry.euclidean.threed import Vector3D
 
+    op_summary, ref_source = _load_op_summary_near_ephem(ephem_path)
+    ref_name = op_summary.get("reference_inertial_frame", "EME2000")
+
     utc = TimeScalesFactory.getUTC()
-    inertial, inertial_name = _get_reference_inertial_frame(inp.reference_frame)
+    inertial, ref_name = _get_reference_inertial_frame(
+        FramesFactory,
+        IERSConventions,
+        ref_name,
+    )
     itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
 
     # Build interpolation arrays
     t_src = ephem["t_dt"].astype("int64").to_numpy() / 1e9  # seconds since epoch
     t_q = nav_sel["t_dt"].astype("int64").to_numpy() / 1e9
+
+    # limit to ephem range first
+    t_min, t_max = float(t_src[0]), float(t_src[-1])
+    mask = (t_q >= t_min) & (t_q <= t_max)
+    nav_sel = nav_sel.loc[mask].reset_index(drop=True)
 
     # If no overlap between OP ephemeris time range and day2 NavSol times, fail fast with a clear message.
     if len(nav_sel) == 0:
@@ -274,6 +277,8 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
             "This usually means you ran OP using an old OD/OP result (different day). "
             "Run 'Run OD' then 'Run OP' for the same day1/day2 pair, then retry Verify."
         )
+
+    t_q = nav_sel["t_dt"].astype("int64").to_numpy() / 1e9
 
     # limit to ephem range
     t_min, t_max = float(t_src[0]), float(t_src[-1])
@@ -351,17 +356,50 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
             "max_m": float(np.nanmax(np.abs(a))),
         }
 
+    radial_stats = _stat(r_list)
+    intrack_stats = _stat(i_list)
+    crosstrack_stats = _stat(c_list)
+
     summary = {
         "status": "ok",
         "validated": True,
         "outputs_dir": str(out_dir),
         "op_ephemeris_csv": str(ephem_path),
         "navsol_day2_csv": str(navsol_path),
-        "reference_inertial_frame": inertial_name,
-        "reference_inertial_frame_source": inp.reference_frame_source,
+        "reference_inertial_frame": ref_name,
+        "reference_inertial_frame_source": ref_source,
+        "compare_target": "day2_navsol",
         "points_compared": int(len(out_df)),
+        "overlap_start_utc": out_df["iso_utc"].iloc[0] if len(out_df) > 0 else None,
+        "overlap_stop_utc": out_df["iso_utc"].iloc[-1] if len(out_df) > 0 else None,
         "pos_3d": {"rms_m": rms, "p95_m": p95, "max_m": mx},
-        "ric": {"radial": _stat(r_list), "intrack": _stat(i_list), "crosstrack": _stat(c_list)},
+        "ric": {
+            "radial": radial_stats,
+            "intrack": intrack_stats,
+            "crosstrack": crosstrack_stats,
+        },
+
+        # flat aliases for GUI / report / MicroCosm-style comparison
+        "validate_pos_3d_rms_m": rms,
+        "validate_pos_3d_p95_m": p95,
+        "validate_pos_3d_max_m": mx,
+
+        "validate_ric_radial_rms_m": radial_stats["rms_m"],
+        "validate_ric_radial_p95_m": radial_stats["p95_m"],
+        "validate_ric_radial_max_m": radial_stats["max_m"],
+
+        "validate_ric_intrack_rms_m": intrack_stats["rms_m"],
+        "validate_ric_intrack_p95_m": intrack_stats["p95_m"],
+        "validate_ric_intrack_max_m": intrack_stats["max_m"],
+
+        "validate_ric_crosstrack_rms_m": crosstrack_stats["rms_m"],
+        "validate_ric_crosstrack_p95_m": crosstrack_stats["p95_m"],
+        "validate_ric_crosstrack_max_m": crosstrack_stats["max_m"],
+
+        # headline metric for MicroCosm-like reporting
+        "microcosm_headline_metric": "I_RMS",
+        "microcosm_headline_value_m": intrack_stats["rms_m"],
+
         "artifacts": {
             "op_validate_csv": out_csv.name,
             "validate_summary_json": "validate_summary.json",

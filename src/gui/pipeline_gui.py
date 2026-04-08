@@ -80,6 +80,8 @@ class PipelineGUI(tk.Tk):
 
         self.var_day1 = tk.StringVar()
         self.var_day2 = tk.StringVar()
+        self.var_validate_target = tk.StringVar(value="day2_navsol")
+        self.var_ref_ephem = tk.StringVar()
         self.var_outdir = tk.StringVar(value="outputs")
         self.var_cfgsave = tk.StringVar(value="")  # optional
 
@@ -94,6 +96,24 @@ class PipelineGUI(tk.Tk):
         ttk.Button(inputs, text="Browse", command=self._pick_day2).grid(row=row, column=2, padx=4)
         row += 1
 
+        ttk.Label(inputs, text="Validate target").grid(row=row, column=0, sticky="w")
+        ttk.Combobox(
+            inputs,
+            textvariable=self.var_validate_target,
+            width=24,
+            values=("day2_navsol", "reference_ephemeris"),
+            state="readonly",
+        ).grid(row=row, column=1, sticky="w", padx=6)
+        ttk.Label(inputs, text="(기본: Day2 NavSol, 선택: day2 OD ephem 비교)", foreground="#666").grid(
+            row=row, column=2, sticky="w"
+        )
+        row += 1
+
+        ttk.Label(inputs, text="Reference ephem CSV (선택)").grid(row=row, column=0, sticky="w")
+        ttk.Entry(inputs, textvariable=self.var_ref_ephem, width=85).grid(row=row, column=1, sticky="we", padx=6)
+        ttk.Button(inputs, text="Browse", command=self._pick_ref_ephem).grid(row=row, column=2, padx=4)
+        row += 1
+
         ttk.Label(inputs, text="Outputs Dir (산출물 폴더)").grid(row=row, column=0, sticky="w")
         ttk.Entry(inputs, textvariable=self.var_outdir, width=85).grid(row=row, column=1, sticky="we", padx=6)
         ttk.Button(inputs, text="Browse", command=self._pick_outdir).grid(row=row, column=2, padx=4)
@@ -102,7 +122,7 @@ class PipelineGUI(tk.Tk):
         hint = (
             "Tip) JSON config를 직접 수정하지 않아도 됩니다.\n"
             " - OP 시작 시각은 기본적으로 OD epoch(추정된 상태벡터 epoch)에서 자동 시작합니다.\n"
-            " - Verify(검증)는 OP 예측(op_ephemeris.csv)과 Day2 NavSol을 비교합니다.\n"
+            " - Validate target=reference_ephemeris 이면 reference ephemeris CSV와 비교합니다.\n"
         )
         ttk.Label(inputs, text=hint, foreground="#666").grid(row=row, column=0, columnspan=3, sticky="w", pady=(6, 0))
         inputs.columnconfigure(1, weight=1)
@@ -284,6 +304,14 @@ class PipelineGUI(tk.Tk):
         if p:
             self.var_day2.set(p)
 
+    def _pick_ref_ephem(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Select reference ephemeris CSV (optional)",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if p:
+            self.var_ref_ephem.set(p)
+
     def _pick_outdir(self) -> None:
         p = filedialog.askdirectory(title="Select outputs directory")
         if p:
@@ -312,9 +340,11 @@ class PipelineGUI(tk.Tk):
     # -----------------------
     # Run pipeline
     # -----------------------
-    def _build_cfg(self, require_day1: bool, require_day2: bool) -> Dict[str, Any]:
+    def _build_cfg(self, require_day1: bool, require_verify: bool) -> Dict[str, Any]:
         day1 = self.var_day1.get().strip()
         day2 = self.var_day2.get().strip()
+        ref_ephem = self.var_ref_ephem.get().strip()
+        validate_target = (self.var_validate_target.get().strip() or "day2_navsol").lower()
         outdir = self.var_outdir.get().strip() or "outputs"
 
         if require_day1:
@@ -326,19 +356,36 @@ class PipelineGUI(tk.Tk):
             if day1 and not Path(day1).exists():
                 raise FileNotFoundError(day1)
 
-        if require_day2:
-            if not day2:
-                raise ValueError("Day2 NavSol CSV is required for Verify.")
-            if not Path(day2).exists():
-                raise FileNotFoundError(day2)
-        else:
-            if day2 and not Path(day2).exists():
-                raise FileNotFoundError(day2)
+        if day2 and not Path(day2).exists():
+            raise FileNotFoundError(day2)
+
+        if ref_ephem and not Path(ref_ephem).exists():
+            raise FileNotFoundError(ref_ephem)
+
+        if require_verify:
+            if validate_target == "day2_navsol":
+                if not day2:
+                    raise ValueError(
+                        "Day2 NavSol CSV is required for Verify when compare_target=day2_navsol."
+                    )
+            elif validate_target == "reference_ephemeris":
+                if not ref_ephem:
+                    raise ValueError(
+                        "Reference ephemeris CSV is required for Verify when compare_target=reference_ephemeris."
+                    )
+            else:
+                raise ValueError(
+                    f"Unsupported validate target: {validate_target} "
+                    "(expected day2_navsol or reference_ephemeris)"
+                )
 
         cfg: Dict[str, Any] = {
             "inputs": {},
             "arc_gap_s": _safe_float(self.var_arc_gap.get(), 60.0),
             "reference_frame": "TOD",
+            "validate": {
+                "compare_target": validate_target,
+            },
             "od": {
                 "arc_mode": self.var_arc_mode.get(),
                 "anchor": self.var_anchor.get(),
@@ -353,7 +400,7 @@ class PipelineGUI(tk.Tk):
                 "mass_kg": _safe_float(self.var_mass.get(), 30.0),
                 "area_m2": _safe_float(self.var_area.get(), 0.052578),
                 "cd0": _safe_float(self.var_cd0.get(), 2.3),
-                "estimate_cd": bool(self.var_est_cd.get()),  # enforced OFF in this phase
+                "estimate_cd": bool(self.var_est_cd.get()),
                 "gravity_degree": _safe_int(self.var_grav_deg.get(), 20),
                 "gravity_order": _safe_int(self.var_grav_ord.get(), 20),
                 "use_third_body": bool(self.var_third_body.get()),
@@ -369,8 +416,9 @@ class PipelineGUI(tk.Tk):
             cfg["inputs"]["navsol_day1_csv"] = day1
         if day2:
             cfg["inputs"]["navsol_day2_csv"] = day2
+        if ref_ephem:
+            cfg["inputs"]["reference_ephem_csv"] = ref_ephem
 
-        # optional OP start time
         ts = self.var_time_start.get().strip()
         if ts:
             cfg["op"]["time_start_utc"] = ts
@@ -406,7 +454,7 @@ class PipelineGUI(tk.Tk):
             return
 
         try:
-            cfg = self._build_cfg(require_day1=do_od, require_day2=do_verify)
+            cfg = self._build_cfg(require_day1=do_od, require_verify=do_verify)
         except Exception as e:
             messagebox.showerror("Invalid settings", str(e))
             return

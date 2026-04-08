@@ -1,8 +1,14 @@
 {
   "inputs": {
     "navsol_day1_csv": "data/navsol_2024-05-01_all.csv",
-    "navsol_day2_csv": "data/navsol_2024-05-02_all.csv"
+    "navsol_day2_csv": "data/navsol_2024-05-02_all.csv",
+    "reference_ephem_csv": "outputs_day2_ref/op_ephemeris.csv"
   },
+
+  "validate": {
+  "compare_target": "reference_ephemeris"
+  },
+  
   "arc_gap_s": 1.5,
 
   "od": {
@@ -48,8 +54,8 @@
     "j71_base_density_mode": "TABLE87_3",
     "j71_density_scale": 2.05,
     "j71_use_diurnal_variation": false,
-    "j71_enable_diagnostics": true,
-    "j71_debug_log_path": "outputs_j71_rho205/j71_diag.csv",
+    "j71_enable_diagnostics": false,
+    "j71_debug_log_path": "outputs_j71_rho205_refcmp/j71_diag.csv",
     "j71_debug_every_n": 200,
     "j71_debug_max_records": 2000,
     "j71_driver_mode": "CSV",
@@ -64,7 +70,7 @@
     "tide_system": "ZERO_TIDE"
   },
 
-  "outputs_dir": "outputs_j71_rho205",
+  "outputs_dir": "outputs_j71_rho205_refcmp",
 
   "orekit_extra_data_paths": [
     "data/eop",

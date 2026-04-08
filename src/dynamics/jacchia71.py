@@ -37,6 +37,15 @@ class Jacchia71Cfg:
     h_scale_km: float = 60.0
     density_scale: float = 1.0
 
+    # optional physics switches
+    use_diurnal_variation: bool = False
+
+    # diagnostics
+    enable_diagnostics: bool = False
+    debug_log_path: Optional[str] = None
+    debug_every_n: int = 200
+    debug_max_records: int = 2000
+
     # driver chain
     driver_mode: str = "FIXED"   # FIXED | CSV
     space_weather_csv: Optional[str] = None
@@ -51,6 +60,7 @@ class Jacchia71Inputs:
     day_of_year: Optional[int]
     mjd_utc: Optional[float]
     sun_declination_rad: Optional[float]
+    sun_hour_angle_rad: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -83,6 +93,12 @@ class Jacchia71DensityKernel:
 
         self._utc = TimeScalesFactory.getUTC()
         self._space_weather_rows = self._load_space_weather_rows()
+
+        self._debug_call_count = 0
+        self._debug_written_count = 0
+        self._debug_log_path: Optional[Path] = None
+
+        self._init_debug_log()
 
     def describe_driver(self) -> str:
         mode = str(self.cfg.driver_mode).strip().upper()
@@ -118,12 +134,134 @@ class Jacchia71DensityKernel:
 
         return f"J71 driver unknown: mode={self.cfg.driver_mode}"
 
+    def _init_debug_log(self) -> None:
+        if not bool(self.cfg.enable_diagnostics):
+            return
+
+        if not self.cfg.debug_log_path:
+            raise RuntimeError(
+                "J71 diagnostics enabled but debug_log_path was not provided."
+            )
+
+        p = Path(str(self.cfg.debug_log_path))
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        self._debug_log_path = p
+
+        if not p.exists():
+            with p.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "call_index",
+                    "mjd_utc",
+                    "alt_km",
+                    "lat_deg",
+                    "lon_deg",
+                    "sun_decl_deg",
+                    "sun_hour_angle_deg",
+                    "driver_iso_utc",
+                    "f107_avg",
+                    "f107_daily",
+                    "kp_3h",
+                    "t_inf_bar_k",
+                    "t_c_k",
+                    "t_l_k",
+                    "d_t_geomag_k",
+                    "texo_k_raw",
+                    "texo_k_clamped",
+                    "p1",
+                    "p2",
+                    "p3",
+                    "p4",
+                    "q1",
+                    "q2",
+                    "rho_kg_m3",
+                ])
+
+    def _maybe_write_debug_row(
+        self,
+        *,
+        j71: Jacchia71Inputs,
+        temp_terms: dict[str, float | str | None],
+        p1: float,
+        p2: float,
+        p3: float,
+        p4: float,
+        q1: float,
+        q2: float,
+        rho_kg_m3: float,
+    ) -> None:
+        if not bool(self.cfg.enable_diagnostics):
+            return
+
+        self._debug_call_count += 1
+
+        every_n = max(1, int(self.cfg.debug_every_n))
+        max_records = max(1, int(self.cfg.debug_max_records))
+
+        if self._debug_written_count >= max_records:
+            return
+
+        if (self._debug_call_count - 1) % every_n != 0:
+            return
+
+        if self._debug_log_path is None:
+            return
+
+        import math
+
+        lat_deg = math.degrees(float(j71.lat_rad))
+        lon_deg = math.degrees(float(j71.lon_rad))
+        sun_decl_deg = (
+            math.degrees(float(j71.sun_declination_rad))
+            if j71.sun_declination_rad is not None
+            else None
+        )
+        sun_hour_angle_deg = (
+            math.degrees(float(j71.sun_hour_angle_rad))
+            if j71.sun_hour_angle_rad is not None
+            else None
+        )
+
+        with self._debug_log_path.open("a", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                self._debug_call_count,
+                j71.mjd_utc,
+                j71.alt_km,
+                lat_deg,
+                lon_deg,
+                sun_decl_deg,
+                sun_hour_angle_deg,
+                temp_terms.get("driver_iso_utc"),
+                temp_terms.get("f107_avg"),
+                temp_terms.get("f107_daily"),
+                temp_terms.get("kp_3h"),
+                temp_terms.get("t_inf_bar_k"),
+                temp_terms.get("t_c_k"),
+                temp_terms.get("t_l_k"),
+                temp_terms.get("d_t_geomag_k"),
+                temp_terms.get("texo_k_raw"),
+                temp_terms.get("texo_k_clamped"),
+                p1,
+                p2,
+                p3,
+                p4,
+                q1,
+                q2,
+                rho_kg_m3,
+            ])
+
+        self._debug_written_count += 1
+
     def density_kg_m3(self, date: Any, position: Any, frame: Any) -> float:
         j71 = self._build_inputs(date, position, frame)
 
+        temp_terms = self._exospheric_temperature_terms(j71)
         texo_k = self._clamp_texo_k_to_density_table_range(
-            self._exospheric_temperature_k(j71)
+            float(temp_terms["texo_k_raw"])
         )
+        temp_terms["texo_k_clamped"] = texo_k
 
         p1 = self._p1_log10_density_g_cm3(j71, texo_k)
         p2 = self._p2_log10_correction(j71)
@@ -132,7 +270,7 @@ class Jacchia71DensityKernel:
         q1 = self._q1_log10_helium_number_density(j71, texo_k)
         q2 = self._q2_log10_helium_correction(j71)
 
-        return self._compose_density_kg_m3(
+        rho_kg_m3 = self._compose_density_kg_m3(
             p1=p1,
             p2=p2,
             p3=p3,
@@ -140,6 +278,20 @@ class Jacchia71DensityKernel:
             q1=q1,
             q2=q2,
         )
+
+        self._maybe_write_debug_row(
+            j71=j71,
+            temp_terms=temp_terms,
+            p1=p1,
+            p2=p2,
+            p3=p3,
+            p4=p4,
+            q1=q1,
+            q2=q2,
+            rho_kg_m3=rho_kg_m3,
+        )
+
+        return rho_kg_m3
 
     def _build_inputs(self, date: Any, position: Any, frame: Any) -> Jacchia71Inputs:
         geodetic = self.earth.transform(position, frame, date)
@@ -153,6 +305,7 @@ class Jacchia71DensityKernel:
         day_of_year = None
         mjd_utc = None
         sun_declination_rad = None
+        sun_hour_angle_rad = None
 
         try:
             d = date
@@ -172,9 +325,13 @@ class Jacchia71DensityKernel:
             mjd_utc = None
 
         try:
-            sun_declination_rad = self._sun_declination_rad(date)
+            sun_declination_rad, sun_hour_angle_rad = self._sun_geometry_rad(
+                date=date,
+                lon_rad=lon_rad,
+            )
         except Exception:
             sun_declination_rad = None
+            sun_hour_angle_rad = None
 
         return Jacchia71Inputs(
             alt_km=alt_km,
@@ -183,9 +340,10 @@ class Jacchia71DensityKernel:
             day_of_year=day_of_year,
             mjd_utc=mjd_utc,
             sun_declination_rad=sun_declination_rad,
+            sun_hour_angle_rad=sun_hour_angle_rad,
         )
     
-    def _sun_declination_rad(self, date: Any) -> float:
+    def _sun_geometry_rad(self, *, date: Any, lon_rad: float) -> tuple[float, float]:
         import math
 
         body_frame = self.earth.getBodyFrame()
@@ -206,9 +364,22 @@ class Jacchia71DensityKernel:
 
         r = math.sqrt(sx * sx + sy * sy + sz * sz)
         if r <= 0.0:
-            raise ValueError("Sun position norm is zero while computing declination.")
+            raise ValueError("Sun position norm is zero while computing geometry.")
 
-        return math.asin(sz / r)
+        # solar declination in body-fixed frame
+        decl_rad = math.asin(sz / r)
+
+        # subsolar longitude in body-fixed frame
+        sun_lon_rad = math.atan2(sy, sx)
+
+        # local solar hour angle, wrapped to [-pi, +pi]
+        hour_angle_rad = lon_rad - sun_lon_rad
+        while hour_angle_rad > math.pi:
+            hour_angle_rad -= 2.0 * math.pi
+        while hour_angle_rad < -math.pi:
+            hour_angle_rad += 2.0 * math.pi
+
+        return decl_rad, hour_angle_rad
     
 
     def _parse_iso_utc(self, s: str) -> dt.datetime:
@@ -300,24 +471,10 @@ class Jacchia71DensityKernel:
         raise ValueError(f"Unsupported J71 driver_mode: {self.cfg.driver_mode}")    
 
 
-    def _exospheric_temperature_k(self, j71: Jacchia71Inputs) -> float:
+    def _exospheric_temperature_terms(self, j71: Jacchia71Inputs) -> dict[str, float | str | None]:
         """
-        Provisional J71 exospheric temperature model.
-
-        Implemented now:
-        - Eq. (8.7-1): T_inf_bar = 379 + 3.24 * F107_avg
-        - Eq. (8.7-2): T_c      = T_inf_bar + 1.3 * (F107_daily - F107_avg)
-
-        Geomagnetic correction:
-        - Above 200 km: Eq. (8.7-4)
-            dT = 28 * Kp + 0.03 * exp(Kp)
-        - Below 200 km: use temperature part of Eq. (8.7-5)(b)
-            dT = 14 * Kp + 0.02 * exp(Kp)
-
-        Deferred to later step:
-        - Diurnal variation
-        - P4 density correction for h < 200 km
-        - Tables.dat driven real flux/Kp chain
+        Compute exospheric temperature terms separately so they can be logged
+        without changing the force model behavior.
         """
         import math
 
@@ -327,18 +484,69 @@ class Jacchia71DensityKernel:
         f107_daily = float(sw.f107_daily)
         kp = max(0.0, float(sw.kp_3h))
 
+        # Eq. (8.7-1), (8.7-2)
         t_inf_bar = 379.0 + 3.24 * f107_avg
         t_c = t_inf_bar + 1.3 * (f107_daily - f107_avg)
 
+        # Eq. (8.7-3): optional diurnal variation
+        if bool(self.cfg.use_diurnal_variation):
+            R = 0.3
+            m = 2.2
+            n = 3.0
+            beta = math.radians(-37.0)
+            p = math.radians(6.0)
+            gamma = math.radians(43.0)
+
+            delta = j71.sun_declination_rad
+            H = j71.sun_hour_angle_rad
+
+            if delta is not None and H is not None:
+                delta = float(delta)
+                H = float(H)
+                phi = float(j71.lat_rad)
+
+                eta = 0.5 * abs(phi - delta)
+                theta = 0.5 * abs(phi + delta)
+
+                tau = H + beta + p * math.sin(H + gamma)
+                while tau > math.pi:
+                    tau -= 2.0 * math.pi
+                while tau < -math.pi:
+                    tau += 2.0 * math.pi
+
+                a1 = max(0.0, math.sin(theta)) ** m
+                a2 = max(0.0, math.cos(eta)) ** m
+                a3 = max(0.0, math.cos(tau / 2.0)) ** n
+
+                t_l = t_c * ((1.0 + R * a1) + R * (a2 - a1) * a3)
+            else:
+                t_l = t_c
+        else:
+            t_l = t_c
+
+        # Geomagnetic correction
         if j71.alt_km >= 200.0:
             d_t_geomag = 28.0 * kp + 0.03 * math.exp(kp)
         else:
             d_t_geomag = 14.0 * kp + 0.02 * math.exp(kp)
 
-        texo_k = t_c + d_t_geomag
+        texo_k = max(183.0, t_l + d_t_geomag)
 
-        # simple sanity floor
-        return max(183.0, texo_k)
+        return {
+            "driver_iso_utc": sw.iso_utc,
+            "f107_avg": f107_avg,
+            "f107_daily": f107_daily,
+            "kp_3h": kp,
+            "t_inf_bar_k": t_inf_bar,
+            "t_c_k": t_c,
+            "t_l_k": t_l,
+            "d_t_geomag_k": d_t_geomag,
+            "texo_k_raw": texo_k,
+            "texo_k_clamped": None,
+        }
+
+    def _exospheric_temperature_k(self, j71: Jacchia71Inputs) -> float:
+        return float(self._exospheric_temperature_terms(j71)["texo_k_raw"])
     
 
     def _clamp_texo_k_to_density_table_range(self, texo_k: float) -> float:
@@ -381,15 +589,19 @@ class Jacchia71DensityKernel:
 
     def _p3_log10_correction(self, j71: Jacchia71Inputs) -> float:
         """
-        Placeholder for P3:
-        seasonal-latitudinal variation of helium / temperature-independent term.
+        P3: lower-thermosphere seasonal-latitudinal density correction.
+
+        For the current ~500 km benchmark case this is effectively inactive,
+        because MicroCosm documentation states the effect is neglected above
+        about 160 km.
         """
         return 0.0
 
     def _p4_log10_correction(self, j71: Jacchia71Inputs) -> float:
         """
-        Placeholder for P4:
-        low-altitude geomagnetic correction term.
+        P4: low-altitude (< 200 km) geomagnetic density correction.
+
+        For the current ~500 km benchmark case this is effectively inactive.
         """
         return 0.0
 
@@ -732,6 +944,11 @@ def build_jacchia71_atmosphere(*, earth: Any, sun: Any, forces: Any) -> Any:
         h_ref_km=float(getattr(forces, "h0_m", 500000.0)) / 1000.0,
         h_scale_km=float(getattr(forces, "h_scale_m", 60000.0)) / 1000.0,
         density_scale=float(getattr(forces, "j71_density_scale", 1.0)),
+        use_diurnal_variation=bool(getattr(forces, "j71_use_diurnal_variation", False)),
+        enable_diagnostics=bool(getattr(forces, "j71_enable_diagnostics", False)),
+        debug_log_path=getattr(forces, "j71_debug_log_path", None),
+        debug_every_n=int(getattr(forces, "j71_debug_every_n", 200)),
+        debug_max_records=int(getattr(forces, "j71_debug_max_records", 2000)),
         driver_mode=str(getattr(forces, "j71_driver_mode", "FIXED")),
         space_weather_csv=getattr(forces, "j71_space_weather_csv", None),
         driver_max_age_days=float(getattr(forces, "j71_driver_max_age_days", 2.0)),

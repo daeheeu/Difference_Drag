@@ -50,6 +50,15 @@ class ForceModelCfg:
     # J71 density diagnostic scale
     j71_density_scale: float = 1.0
 
+    # J71 optional physics switches
+    j71_use_diurnal_variation: bool = False
+
+    # J71 diagnostics
+    j71_enable_diagnostics: bool = False
+    j71_debug_log_path: Optional[str] = None
+    j71_debug_every_n: int = 200
+    j71_debug_max_records: int = 2000
+
     # SRP
     use_srp: bool = False
     cr0: float = 1.5
@@ -220,6 +229,11 @@ def _build_atmosphere(*, earth: Any, sun: Any, forces: ForceModelCfg):
                 "J71 density settings: "
                 f"base_density_mode={str(forces.j71_base_density_mode)}, "
                 f"density_scale={float(forces.j71_density_scale)}, "
+                f"use_diurnal_variation={bool(forces.j71_use_diurnal_variation)}, "
+                f"enable_diagnostics={bool(forces.j71_enable_diagnostics)}, "
+                f"debug_log_path={str(forces.j71_debug_log_path)}, "
+                f"debug_every_n={int(forces.j71_debug_every_n)}, "
+                f"debug_max_records={int(forces.j71_debug_max_records)}, "
                 f"fallback_fixed=("
                 f"{float(forces.j71_f107_avg)}, "
                 f"{float(forces.j71_f107_daily)}, "

@@ -47,9 +47,9 @@
     "j71_kp_3h": 2.0,
     "j71_base_density_mode": "TABLE87_3",
     "j71_density_scale": 2.05,
-    "j71_use_diurnal_variation": false,
+    "j71_use_diurnal_variation": true,
     "j71_enable_diagnostics": true,
-    "j71_debug_log_path": "outputs_j71_rho205/j71_diag.csv",
+    "j71_debug_log_path": "outputs_j71_rho205_diurnal/j71_diag.csv",
     "j71_debug_every_n": 200,
     "j71_debug_max_records": 2000,
     "j71_driver_mode": "CSV",
@@ -64,7 +64,7 @@
     "tide_system": "ZERO_TIDE"
   },
 
-  "outputs_dir": "outputs_j71_rho205",
+  "outputs_dir": "outputs_j71_rho205_diurnal",
 
   "orekit_extra_data_paths": [
     "data/eop",

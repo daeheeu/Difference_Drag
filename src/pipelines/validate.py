@@ -57,6 +57,25 @@ def _load_navsol_csv(path: Path) -> pd.DataFrame:
     return df
 
 
+def _load_reference_ephem_csv(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+
+    need = {
+        "iso_utc",
+        "x_i_m", "y_i_m", "z_i_m",
+        "vx_i_mps", "vy_i_mps", "vz_i_mps",
+    }
+    missing = need - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"{path} does not look like reference ephemeris CSV (missing {sorted(missing)})."
+        )
+
+    df["t_dt"] = pd.to_datetime(df["iso_utc"], utc=True)
+    df = df.sort_values("t_dt").reset_index(drop=True)
+    return df
+
+
 def _split_arcs(df: pd.DataFrame, gap_s: float) -> List[pd.DataFrame]:
     if df.empty:
         return []
@@ -92,6 +111,7 @@ class Inputs:
     outputs_dir: Optional[Path] = None
     ephem_path: Optional[Path] = None
     navsol_path: Optional[Path] = None
+    ref_ephem_path: Optional[Path] = None
 
 
 def _resolve_inputs(argv: List[str]) -> Inputs:
@@ -99,24 +119,50 @@ def _resolve_inputs(argv: List[str]) -> Inputs:
     if len(argv) >= 3 and argv[1].lower().endswith(".csv"):
         ephem = Path(argv[1])
         nav = Path(argv[2])
-        return Inputs(mode="files", ephem_path=ephem, navsol_path=nav, outputs_dir=ephem.parent)
+        return Inputs(
+            mode="files",
+            ephem_path=ephem,
+            navsol_path=nav,
+            outputs_dir=ephem.parent,
+        )
 
     # Config mode
     cfg_path = Path(argv[1])
     cfg = _load_json(cfg_path)
     out_dir = Path(cfg.get("outputs_dir", "outputs"))
-    # locate ephemeris
+
+    # locate source OP ephemeris
     ephem = out_dir / "op_ephemeris.csv"
     if not ephem.exists():
-        # legacy
         legacy = out_dir / "case_c_op_ephemeris.csv"
         if legacy.exists():
             ephem = legacy
-    # locate navsol day2
+
     inp = cfg.get("inputs", {}) if isinstance(cfg, dict) else {}
+    validate_cfg = cfg.get("validate", {}) if isinstance(cfg, dict) else {}
+
+    # NavSol compare input
     nav = inp.get("navsol_day2_csv") or cfg.get("navsol_day2_csv")
     nav_path = Path(nav) if nav else None
-    return Inputs(mode="config", cfg=cfg, outputs_dir=out_dir, ephem_path=ephem, navsol_path=nav_path)
+
+    # Reference ephemeris compare input (for day2 OD overlap compare)
+    ref_ephem = (
+        validate_cfg.get("reference_ephem_csv")
+        or inp.get("reference_ephem_csv")
+        or inp.get("day2_od_ephemeris_csv")
+        or cfg.get("reference_ephem_csv")
+        or cfg.get("day2_od_ephemeris_csv")
+    )
+    ref_ephem_path = Path(ref_ephem) if ref_ephem else None
+
+    return Inputs(
+        mode="config",
+        cfg=cfg,
+        outputs_dir=out_dir,
+        ephem_path=ephem,
+        navsol_path=nav_path,
+        ref_ephem_path=ref_ephem_path,
+    )
 
 
 def _load_op_summary_near_ephem(ephem_path: Path) -> Tuple[Dict[str, Any], str]:
@@ -170,26 +216,50 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
     out_dir = inp.outputs_dir or Path("outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if inp.navsol_path is None or not Path(inp.navsol_path).exists():
-        # No day2 data -> skip
-        summary = {
-            "status": "ok",
-            "validated": False,
-            "reason": "navsol_day2_csv not provided or file not found",
-            "outputs_dir": str(out_dir),
-        }
-        (out_dir / "validate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        return summary
+    validate_cfg = inp.cfg.get("validate", {}) if inp.cfg else {}
+    compare_target = str(validate_cfg.get("compare_target", "day2_navsol")).strip().lower()
+
+    if compare_target not in ("day2_navsol", "reference_ephemeris"):
+        raise ValueError(
+            f"Unsupported validate.compare_target: {compare_target} "
+            "(expected day2_navsol or reference_ephemeris)"
+        )
+
+    if compare_target == "day2_navsol":
+        if inp.navsol_path is None or not Path(inp.navsol_path).exists():
+            summary = {
+                "status": "ok",
+                "validated": False,
+                "reason": "navsol_day2_csv not provided or file not found",
+                "outputs_dir": str(out_dir),
+                "compare_target": compare_target,
+            }
+            (out_dir / "validate_summary.json").write_text(
+                json.dumps(summary, indent=2),
+                encoding="utf-8",
+            )
+            return summary
+
+    if compare_target == "reference_ephemeris":
+        if inp.ref_ephem_path is None or not Path(inp.ref_ephem_path).exists():
+            summary = {
+                "status": "ok",
+                "validated": False,
+                "reason": "reference_ephem_csv not provided or file not found",
+                "outputs_dir": str(out_dir),
+                "compare_target": compare_target,
+            }
+            (out_dir / "validate_summary.json").write_text(
+                json.dumps(summary, indent=2),
+                encoding="utf-8",
+            )
+            return summary
 
     ephem_path = Path(inp.ephem_path)
     if not ephem_path.exists():
         raise FileNotFoundError(f"OP ephemeris not found: {ephem_path}")
 
-    navsol_path = Path(inp.navsol_path)
-    if not navsol_path.exists():
-        raise FileNotFoundError(f"NavSol day2 not found: {navsol_path}")
-
-    # Load data
+    # Load source OP ephemeris
     ephem = pd.read_csv(ephem_path)
     if "iso_utc" not in ephem.columns:
         raise ValueError(f"{ephem_path} missing iso_utc")
@@ -197,17 +267,15 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
     ephem["t_dt"] = pd.to_datetime(ephem["iso_utc"], utc=True)
     ephem = ephem.sort_values("t_dt").reset_index(drop=True)
 
-    nav = _load_navsol_csv(navsol_path)
+    cols = [
+        "x_i_m", "y_i_m", "z_i_m", "vx_i_mps", "vy_i_mps", "vz_i_mps",
+        "x_ecef_m", "y_ecef_m", "z_ecef_m",
+    ]
+    for c in cols:
+        if c not in ephem.columns:
+            raise ValueError(f"{ephem_path} missing column {c}")
 
-    # Arc selection (config mode only)
-    gap_s = float(inp.cfg.get("arc_gap_s", 60.0)) if inp.cfg else 60.0
-    arc_indices = None
-    if inp.cfg:
-        op = inp.cfg.get("op", {}) if isinstance(inp.cfg, dict) else {}
-        arc_indices = op.get("arc_indices", None)
-    nav_sel = _select_arcs(nav, gap_s, arc_indices)
-
-    # Initialize orekit for ECEF->inertial transform (for RIC error)
+    # Initialize orekit only once (needed for NavSol -> inertial transform path)
     orekit_data_path = inp.cfg.get("orekit_data_path") if inp.cfg else None
     extra_data_paths = inp.cfg.get("orekit_extra_data_paths") if inp.cfg else None
     init_orekit(orekit_data_path, extra_data_paths=extra_data_paths)
@@ -228,79 +296,219 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
     )
     itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, True)
 
-    # Build interpolation arrays
-    t_src = ephem["t_dt"].astype("int64").to_numpy() / 1e9  # seconds since epoch
-    t_q = nav_sel["t_dt"].astype("int64").to_numpy() / 1e9
+    t_src = ephem["t_dt"].astype("int64").to_numpy() / 1e9
 
-    # limit to ephem range first
-    t_min, t_max = float(t_src[0]), float(t_src[-1])
-    mask = (t_q >= t_min) & (t_q <= t_max)
-    nav_sel = nav_sel.loc[mask].reset_index(drop=True)
+    # -----------------------------
+    # Build comparison dataset
+    # -----------------------------
+    compare_path_str = None
+    compare_frame_note = None
 
-    # If no overlap between OP ephemeris time range and day2 NavSol times, fail fast with a clear message.
-    if len(nav_sel) == 0:
-        ephem_start = ephem["t_dt"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        ephem_stop  = ephem["t_dt"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        nav_start = nav["t_dt"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        nav_stop  = nav["t_dt"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        raise ValueError(
-            "No overlapping timestamps for validation. "
-            f"OP ephemeris range=[{ephem_start} ~ {ephem_stop}], "
-            f"Day2 NavSol range=[{nav_start} ~ {nav_stop}]. "
-            "This usually means you ran OP using an old OD/OP result (different day). "
-            "Run 'Run OD' then 'Run OP' for the same day1/day2 pair, then retry Verify."
-        )
+    if compare_target == "day2_navsol":
+        navsol_path = Path(inp.navsol_path)
+        if not navsol_path.exists():
+            raise FileNotFoundError(f"NavSol day2 not found: {navsol_path}")
 
-    t_q = nav_sel["t_dt"].astype("int64").to_numpy() / 1e9
+        nav = _load_navsol_csv(navsol_path)
 
-    cols = [
-        "x_i_m","y_i_m","z_i_m","vx_i_mps","vy_i_mps","vz_i_mps",
-        "x_ecef_m","y_ecef_m","z_ecef_m",
-    ]
-    for c in cols:
-        if c not in ephem.columns:
-            raise ValueError(f"{ephem_path} missing column {c}")
+        gap_s = float(inp.cfg.get("arc_gap_s", 60.0)) if inp.cfg else 60.0
+        arc_indices = None
+        if inp.cfg:
+            op = inp.cfg.get("op", {}) if isinstance(inp.cfg, dict) else {}
+            arc_indices = op.get("arc_indices", None)
+        cmp_df = _select_arcs(nav, gap_s, arc_indices)
 
+        t_q = cmp_df["t_dt"].astype("int64").to_numpy() / 1e9
+        t_min, t_max = float(t_src[0]), float(t_src[-1])
+        mask = (t_q >= t_min) & (t_q <= t_max)
+        cmp_df = cmp_df.loc[mask].reset_index(drop=True)
+
+        if len(cmp_df) == 0:
+            ephem_start = ephem["t_dt"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            ephem_stop  = ephem["t_dt"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            nav_start = nav["t_dt"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            nav_stop  = nav["t_dt"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            raise ValueError(
+                "No overlapping timestamps for validation. "
+                f"OP ephemeris range=[{ephem_start} ~ {ephem_stop}], "
+                f"Day2 NavSol range=[{nav_start} ~ {nav_stop}]. "
+                "This usually means you ran OP using an old OD/OP result (different day). "
+                "Run 'Run OD' then 'Run OP' for the same day1/day2 pair, then retry Verify."
+            )
+
+        t_q = cmp_df["t_dt"].astype("int64").to_numpy() / 1e9
+        compare_path_str = str(navsol_path)
+
+    else:
+        ref_ephem_path = Path(inp.ref_ephem_path)
+        if not ref_ephem_path.exists():
+            raise FileNotFoundError(f"Reference ephemeris not found: {ref_ephem_path}")
+
+        cmp_df = _load_reference_ephem_csv(ref_ephem_path)
+
+        cmp_summary, cmp_summary_source = _load_op_summary_near_ephem(ref_ephem_path)
+        cmp_frame = cmp_summary.get("reference_inertial_frame", ref_name)
+        compare_frame_note = f"{cmp_frame} via {cmp_summary_source}"
+
+        if str(cmp_frame).strip().upper() != str(ref_name).strip().upper():
+            raise ValueError(
+                "Reference ephemeris frame mismatch: "
+                f"source OP frame={ref_name}, reference ephem frame={cmp_frame}"
+            )
+
+        t_q = cmp_df["t_dt"].astype("int64").to_numpy() / 1e9
+        t_min, t_max = float(t_src[0]), float(t_src[-1])
+        mask = (t_q >= t_min) & (t_q <= t_max)
+        cmp_df = cmp_df.loc[mask].reset_index(drop=True)
+
+        if len(cmp_df) == 0:
+            ephem_start = ephem["t_dt"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            ephem_stop  = ephem["t_dt"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            ref_start = cmp_df["t_dt"].iloc[0].strftime("%Y-%m-%dT%H:%M:%S.%fZ") if len(cmp_df) > 0 else "N/A"
+            ref_stop  = cmp_df["t_dt"].iloc[-1].strftime("%Y-%m-%dT%H:%M:%S.%fZ") if len(cmp_df) > 0 else "N/A"
+            raise ValueError(
+                "No overlapping timestamps for validation against reference ephemeris. "
+                f"OP ephemeris range=[{ephem_start} ~ {ephem_stop}], "
+                f"Reference ephemeris overlap range=[{ref_start} ~ {ref_stop}]"
+            )
+
+        t_q = cmp_df["t_dt"].astype("int64").to_numpy() / 1e9
+        compare_path_str = str(ref_ephem_path)
+
+    # -----------------------------
+    # Interpolate source OP at comparison times
+    # -----------------------------
     pred = {}
     for c in cols:
         pred[c] = _interp_series(t_src, ephem[c].to_numpy(dtype=float), t_q)
 
+    # -----------------------------
     # Compute errors
+    # -----------------------------
     out_rows = []
     norms = []
     r_list, i_list, c_list = [], [], []
-    for k, row in nav_sel.iterrows():
-        ts = row["t_dt"].to_pydatetime().astimezone(dt.timezone.utc)
 
-        obs_ecef = np.array([float(row["x_m"]), float(row["y_m"]), float(row["z_m"])], dtype=float)
-        pred_ecef = np.array([pred["x_ecef_m"][k], pred["y_ecef_m"][k], pred["z_ecef_m"][k]], dtype=float)
-        err_ecef = obs_ecef - pred_ecef
+    if compare_target == "day2_navsol":
+        for k, row in cmp_df.iterrows():
+            ts = row["t_dt"].to_pydatetime().astimezone(dt.timezone.utc)
 
-        # inertial obs via orekit transform
-        date = AbsoluteDate(ts.year, ts.month, ts.day, ts.hour, ts.minute,
-                            ts.second + ts.microsecond / 1e6, utc)
-        tr = itrf.getTransformTo(inertial, date)
-        obs_i_v3 = tr.transformPosition(Vector3D(obs_ecef[0], obs_ecef[1], obs_ecef[2]))
-        obs_i = np.array([float(obs_i_v3.getX()), float(obs_i_v3.getY()), float(obs_i_v3.getZ())], dtype=float)
+            obs_ecef = np.array(
+                [float(row["x_m"]), float(row["y_m"]), float(row["z_m"])],
+                dtype=float,
+            )
+            pred_ecef = np.array(
+                [pred["x_ecef_m"][k], pred["y_ecef_m"][k], pred["z_ecef_m"][k]],
+                dtype=float,
+            )
+            err_ecef = obs_ecef - pred_ecef
 
-        pred_i = np.array([pred["x_i_m"][k], pred["y_i_m"][k], pred["z_i_m"][k]], dtype=float)
-        pred_v = np.array([pred["vx_i_mps"][k], pred["vy_i_mps"][k], pred["vz_i_mps"][k]], dtype=float)
+            date = AbsoluteDate(
+                ts.year, ts.month, ts.day, ts.hour, ts.minute,
+                ts.second + ts.microsecond / 1e6,
+                utc,
+            )
+            tr = itrf.getTransformTo(inertial, date)
+            obs_i_v3 = tr.transformPosition(Vector3D(obs_ecef[0], obs_ecef[1], obs_ecef[2]))
+            obs_i = np.array(
+                [float(obs_i_v3.getX()), float(obs_i_v3.getY()), float(obs_i_v3.getZ())],
+                dtype=float,
+            )
 
-        err_i = obs_i - pred_i
-        err_norm = float(np.linalg.norm(err_i))
-        norms.append(err_norm)
+            pred_i = np.array(
+                [pred["x_i_m"][k], pred["y_i_m"][k], pred["z_i_m"][k]],
+                dtype=float,
+            )
+            pred_v = np.array(
+                [pred["vx_i_mps"][k], pred["vy_i_mps"][k], pred["vz_i_mps"][k]],
+                dtype=float,
+            )
 
-        r_err, i_err, c_err = _ric_components(pred_i, pred_v, err_i)
-        r_list.append(r_err); i_list.append(i_err); c_list.append(c_err)
+            err_i = obs_i - pred_i
+            err_norm = float(np.linalg.norm(err_i))
+            norms.append(err_norm)
 
-        out_rows.append({
-            "iso_utc": ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "obs_x_ecef_m": obs_ecef[0], "obs_y_ecef_m": obs_ecef[1], "obs_z_ecef_m": obs_ecef[2],
-            "pred_x_ecef_m": pred_ecef[0], "pred_y_ecef_m": pred_ecef[1], "pred_z_ecef_m": pred_ecef[2],
-            "err_x_ecef_m": err_ecef[0], "err_y_ecef_m": err_ecef[1], "err_z_ecef_m": err_ecef[2],
-            "err_norm_m": err_norm,
-            "err_r_m": r_err, "err_i_m": i_err, "err_c_m": c_err,
-        })
+            r_err, i_err, c_err = _ric_components(pred_i, pred_v, err_i)
+            r_list.append(r_err)
+            i_list.append(i_err)
+            c_list.append(c_err)
+
+            out_rows.append({
+                "iso_utc": ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "obs_x_ecef_m": obs_ecef[0],
+                "obs_y_ecef_m": obs_ecef[1],
+                "obs_z_ecef_m": obs_ecef[2],
+                "pred_x_ecef_m": pred_ecef[0],
+                "pred_y_ecef_m": pred_ecef[1],
+                "pred_z_ecef_m": pred_ecef[2],
+                "err_x_ecef_m": err_ecef[0],
+                "err_y_ecef_m": err_ecef[1],
+                "err_z_ecef_m": err_ecef[2],
+                "err_norm_m": err_norm,
+                "err_r_m": r_err,
+                "err_i_m": i_err,
+                "err_c_m": c_err,
+            })
+
+    else:
+        has_ref_ecef = {"x_ecef_m", "y_ecef_m", "z_ecef_m"}.issubset(cmp_df.columns)
+
+        for k, row in cmp_df.iterrows():
+            ts = row["t_dt"].to_pydatetime().astimezone(dt.timezone.utc)
+
+            ref_i = np.array(
+                [float(row["x_i_m"]), float(row["y_i_m"]), float(row["z_i_m"])],
+                dtype=float,
+            )
+            pred_i = np.array(
+                [pred["x_i_m"][k], pred["y_i_m"][k], pred["z_i_m"][k]],
+                dtype=float,
+            )
+            pred_v = np.array(
+                [pred["vx_i_mps"][k], pred["vy_i_mps"][k], pred["vz_i_mps"][k]],
+                dtype=float,
+            )
+
+            err_i = ref_i - pred_i
+            err_norm = float(np.linalg.norm(err_i))
+            norms.append(err_norm)
+
+            r_err, i_err, c_err = _ric_components(pred_i, pred_v, err_i)
+            r_list.append(r_err)
+            i_list.append(i_err)
+            c_list.append(c_err)
+
+            pred_ecef = np.array(
+                [pred["x_ecef_m"][k], pred["y_ecef_m"][k], pred["z_ecef_m"][k]],
+                dtype=float,
+            )
+
+            if has_ref_ecef:
+                ref_ecef = np.array(
+                    [float(row["x_ecef_m"]), float(row["y_ecef_m"]), float(row["z_ecef_m"])],
+                    dtype=float,
+                )
+                err_ecef = ref_ecef - pred_ecef
+            else:
+                ref_ecef = np.array([np.nan, np.nan, np.nan], dtype=float)
+                err_ecef = np.array([np.nan, np.nan, np.nan], dtype=float)
+
+            out_rows.append({
+                "iso_utc": ts.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "ref_x_ecef_m": ref_ecef[0],
+                "ref_y_ecef_m": ref_ecef[1],
+                "ref_z_ecef_m": ref_ecef[2],
+                "pred_x_ecef_m": pred_ecef[0],
+                "pred_y_ecef_m": pred_ecef[1],
+                "pred_z_ecef_m": pred_ecef[2],
+                "err_x_ecef_m": err_ecef[0],
+                "err_y_ecef_m": err_ecef[1],
+                "err_z_ecef_m": err_ecef[2],
+                "err_norm_m": err_norm,
+                "err_r_m": r_err,
+                "err_i_m": i_err,
+                "err_c_m": c_err,
+            })
 
     out_df = pd.DataFrame(out_rows)
     out_csv = out_dir / "op_validate.csv"
@@ -311,7 +519,6 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
     p95 = float(np.nanpercentile(norms_arr, 95))
     mx = float(np.nanmax(norms_arr))
 
-    # RIC stats
     def _stat(arr):
         a = np.array(arr, dtype=float)
         if a.size == 0:
@@ -332,10 +539,12 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
         "validated": True,
         "outputs_dir": str(out_dir),
         "op_ephemeris_csv": str(ephem_path),
-        "navsol_day2_csv": str(navsol_path),
+        "navsol_day2_csv": str(inp.navsol_path) if compare_target == "day2_navsol" and inp.navsol_path else None,
+        "reference_ephemeris_csv": str(inp.ref_ephem_path) if compare_target == "reference_ephemeris" and inp.ref_ephem_path else None,
         "reference_inertial_frame": ref_name,
         "reference_inertial_frame_source": ref_source,
-        "compare_target": "day2_navsol",
+        "reference_compare_frame_note": compare_frame_note,
+        "compare_target": compare_target,
         "points_compared": int(len(out_df)),
         "overlap_start_utc": out_df["iso_utc"].iloc[0] if len(out_df) > 0 else None,
         "overlap_stop_utc": out_df["iso_utc"].iloc[-1] if len(out_df) > 0 else None,
@@ -372,7 +581,10 @@ def run_validate(argv: List[str]) -> Dict[str, Any]:
             "validate_summary_json": "validate_summary.json",
         },
     }
-    (out_dir / "validate_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out_dir / "validate_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
     return summary
 
 
